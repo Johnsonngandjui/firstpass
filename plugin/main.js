@@ -1502,9 +1502,10 @@ async function probeMotion(items) {
               try {
                 const prm = await comp[pGet](p);
                 if (!prm) continue;
-                const dn = typeof prm.getDisplayName === "function" ? await prm.getDisplayName().catch(() => "") : "";
-                const pn = typeof prm.getName === "function" ? await prm.getName().catch(() => "") : "";
-                info.params.push({ index: p, displayName: dn, name: pn, methods: listAllMethods(prm) });
+                let sv = "?"; try { sv = JSON.stringify(await prm.getStartValue()); } catch (e) { sv = "err:" + (e && e.message ? e.message : e); }
+                let kf = "?"; try { kf = await prm.areKeyframesSupported(); } catch (_) {}
+                let dn = ""; try { dn = typeof prm.getDisplayName === "function" ? await prm.getDisplayName() : ""; } catch (_) {}
+                info.params.push({ index: p, displayName: dn, startValue: sv, keyframable: kf });
               } catch (_) {}
             }
           }
