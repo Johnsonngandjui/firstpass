@@ -1068,18 +1068,17 @@ const segById = (id) => (flowSegs || []).find(s => s.id === id);
 async function planFlow() {
   const words = keptWords();
   if (!words.length) throw new Error("No transcript yet — run Master (or an analysis) first.");
-  const goal = ($("#flow-goal")?.value || "").trim();
   const status = $("#flow-status");
   status.className = "ai-status";
   status.classList.remove("hidden");
-  status.textContent = "Planning with the local model… a long clip can take a minute.";
+  status.textContent = "Grouping by topic and arranging the story… a long clip can take a minute.";
   $("#flow-result").classList.add("hidden");
 
   let resp;
   try {
     resp = await fetch(`${HELPER}/plan_flow`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ words, goal: goal || null })
+      body: JSON.stringify({ words })
     });
   } catch (e) { throw new Error("Helper not reachable — is the server running?"); }
   if (!resp.ok) {
@@ -1107,17 +1106,25 @@ function renderFlowPlan(data) {
     P.push(`<div class="flow-item hook"><b>Opens on:</b> “${escapeHtml(h ? h.text : "")}”<br>${escapeHtml(plan.hook.why || "")}</div>`);
   }
 
-  P.push(`<div class="flow-sec-title">New order ${plan.reordered ? "· reordered" : "· unchanged"}</div>`);
-  plan.order.forEach((id, i) => {
-    const s = segById(id); if (!s) return;
-    const moved = origOrder[i] !== id;
-    P.push(
-      `<div class="flow-seg${moved ? " moved" : ""}">` +
-      `<span class="idx">${i + 1}</span>` +
-      `<span class="txt">${escapeHtml(s.text)}</span>` +
-      (moved ? `<span class="movedtag">was #${id}</span>` : "") +
-      `</div>`);
-  });
+  // Story = topics in order, each with its segments. A segment is "moved" if its
+  // new position differs from the original recording order.
+  P.push(`<div class="flow-sec-title">Story ${plan.reordered ? "· regrouped" : "· unchanged"}</div>`);
+  let pos = 0;
+  for (const t of (plan.topics || [])) {
+    P.push(`<div class="flow-topic"><span class="flow-topic-title">${escapeHtml(t.title || "Topic")}</span>` +
+           (t.why ? `<span class="flow-topic-why">${escapeHtml(t.why)}</span>` : "") + `</div>`);
+    for (const id of (t.segment_ids || [])) {
+      const s = segById(id); if (!s) continue;
+      const moved = origOrder[pos] !== id;
+      P.push(
+        `<div class="flow-seg${moved ? " moved" : ""}">` +
+        `<span class="idx">${pos + 1}</span>` +
+        `<span class="txt">${escapeHtml(s.text)}</span>` +
+        (moved ? `<span class="movedtag">was #${id}</span>` : "") +
+        `</div>`);
+      pos++;
+    }
+  }
 
   if (plan.broll && plan.broll.length) {
     P.push(`<div class="flow-sec-title">B-roll (${plan.broll.length})</div>`);

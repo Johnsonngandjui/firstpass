@@ -370,6 +370,13 @@ body {
 .flow-item b { color: var(--text); font-weight: 600; }
 .flow-item.warn { border-color: rgba(232,168,56,0.45); color: #e8c07a; }
 .flow-item.hook { border-color: rgba(38,128,235,0.45); }
+.flow-topic {
+  display: flex; flex-direction: column; gap: 2px;
+  margin: 16px 0 6px; padding-left: 10px;
+  border-left: 3px solid var(--blue);
+}
+.flow-topic-title { font-size: 13px; font-weight: 700; color: var(--text); }
+.flow-topic-why { font-size: 11px; color: var(--text-mute); line-height: 1.4; }
 
 /* ══ TOGGLE SWITCH ════════════════════════════════════════════ */
 .switch-row {
@@ -984,18 +991,14 @@ body {
       <section class="view" data-view="flow">
         <header class="view-head">
           <h1>AI Flow</h1>
-          <p>Reorder for a stronger hook, mark b-roll, and pace for retention — reviewed before anything changes.</p>
+          <p>Groups your clips by topic and arranges them into a story that's easy to follow — reviewed before anything moves.</p>
         </header>
 
-        <div class="card">
-          <label class="field-lbl">Goal <span class="info-ico" title="Optional. Tell the model the vibe, e.g. 'punchy hook for Reels' or 'calm, thoughtful'.">i</span></label>
-          <div class="num-wrap" style="width:100%;"><input type="text" id="flow-goal" placeholder="e.g. punchy hook for a short-form Reel" style="width:100%;"></div>
-          <p class="hint-note" style="margin-top:12px;">Runs on the transcript from your last <b>Master</b> (or analysis). Runs a local model on your Mac — no cloud, no cost. A long clip may take a minute.</p>
-        </div>
+        <p class="hint-note">Uses the transcript from your last <b>Master</b> (or analysis). Runs a local model on your Mac — no cloud, no cost. A long clip may take a minute.</p>
 
         <div class="action-bar">
           <span class="flex-spacer"></span>
-          <div class="btn primary" id="flow-plan" role="button" tabindex="0">Plan flow</div>
+          <div class="btn primary" id="flow-plan" role="button" tabindex="0">Arrange story</div>
         </div>
 
         <div id="flow-status" class="ai-status hidden"></div>

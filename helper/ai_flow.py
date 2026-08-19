@@ -95,48 +95,54 @@ def segment_transcript(words: list[dict], min_pause: float = 0.6) -> list[dict]:
 
 # ── The plan ────────────────────────────────────────────────────────────────
 _SYSTEM = (
-    "You are a senior short-form video editor. You are given the ordered spoken "
-    "segments of a talking-head clip that has already had silence, filler words, "
-    "and repeated takes removed. Your job is to maximize viewer retention while "
-    "PRESERVING meaning and continuity. You reorder segments, mark where b-roll "
-    "would lift engagement, and suggest pacing beats. You never invent content."
+    "You are a senior short-form video story editor. You are given the ordered "
+    "spoken segments of a talking-head clip that has already had silence, filler "
+    "words, and repeated takes removed. Your job: GROUP the segments into a few "
+    "coherent topics, and ARRANGE those topics into a clear, compelling story the "
+    "viewer can easily follow — a strong hook, a logical build, a satisfying "
+    "close. You never invent, reword, or drop content; you only group and reorder "
+    "the existing segments so each part of the video has one well-defined topic."
 )
 
 _SCHEMA_INSTRUCTIONS = """Return ONLY valid JSON with exactly this shape:
 {
-  "order": [<segment ids, in the NEW order>],
-  "hook":  {"segment_id": <id>, "why": "<why this opens strongest>"},
+  "topics": [
+    {"title": "<2-4 word topic label>",
+     "segment_ids": [<ids in this topic, in the best order within it>],
+     "why": "<why this topic sits at this point in the story>"}
+  ],
+  "hook":  {"segment_id": <id>, "why": "<why it opens strongest>"},
   "broll": [{"after_segment": <id>, "idea": "<what to show>", "why": "<why>"}],
   "pacing":[{"after_segment": <id>, "action": "pause"|"tighten", "seconds": <number>, "why": "<why>"}],
-  "notes": "<one paragraph on the overall flow>",
-  "warnings": ["<continuity risks introduced by any reordering>"]
+  "notes": "<one sentence describing the resulting story arc>",
+  "warnings": ["<continuity risks introduced by regrouping/reordering>"]
 }
 
 Rules:
-- "order" MUST contain every segment id exactly once, UNLESS a segment is truly
-  redundant — then omit it and explain in "warnings".
-- Reorder conservatively: only move a segment if it clearly improves the hook or
-  logical flow. If the original order is already good, return it unchanged.
-- Put the strongest, most curiosity-provoking line first as the hook.
-- Flag continuity risks (back-references like "as I said", tone/topic jumps that
-  a reorder would break) in "warnings".
-- b-roll and pacing "after_segment" refer to ids in the NEW order.
+- Every segment id MUST appear in exactly ONE topic's segment_ids. Never drop or
+  duplicate a segment.
+- Use 2-5 topics. Order the topics to tell the best story; the FIRST segment of
+  the FIRST topic is the hook.
+- Within a topic, order segments so they read naturally.
+- Group by MEANING/theme, not by original position — related ideas belong
+  together even if they were far apart in the recording.
+- Flag continuity risks (back-references like "as I said", tone/topic jumps)
+  in "warnings". "after_segment" ids refer to segment ids.
 """
 
 
 def plan_flow(words: list[dict], goal: Optional[str] = None) -> dict:
-    """Build the edit plan from a transcript. Returns a dict with the plan plus
+    """Build the topic-grouped story plan from a transcript. Returns the plan plus
     the segment table the UXP panel needs to map ids back to source timecodes."""
     segments = segment_transcript(words)
     if len(segments) < 2:
         return {"segments": segments, "plan": None,
-                "message": "Not enough distinct segments to reorder."}
+                "message": "Not enough distinct segments to arrange."}
 
     seg_lines = "\n".join(
         f'[{s["id"]}] ({s["start"]:.1f}-{s["end"]:.1f}s) "{s["text"]}"' for s in segments
     )
-    goal_line = f"\nCreator's goal: {goal}\n" if goal else ""
-    user = f"{_SCHEMA_INSTRUCTIONS}\n{goal_line}\nSegments:\n{seg_lines}"
+    user = f"{_SCHEMA_INSTRUCTIONS}\nSegments:\n{seg_lines}"
 
     raw = _chat(_SYSTEM, user, want_json=True)
     try:
@@ -153,26 +159,39 @@ def plan_flow(words: list[dict], goal: Optional[str] = None) -> dict:
 
 
 def _validate_plan(plan: dict, segments: list[dict]) -> dict:
-    """Repair/sanity-check the model output so the panel can trust it."""
-    valid_ids = {s["id"] for s in segments}
+    """Repair/sanity-check the model output so the panel can trust it:
+    - every segment assigned to exactly one topic (first wins; strays appended)
+    - derive the flat `order` from the topic grouping"""
+    valid_ids = [s["id"] for s in segments]
+    valid_set = set(valid_ids)
 
-    order = [i for i in (plan.get("order") or []) if i in valid_ids]
-    seen, deduped = set(), []
-    for i in order:
-        if i not in seen:
-            seen.add(i); deduped.append(i)
-    # any segment the model dropped from order → append in original position so
-    # nothing silently vanishes; the panel shows these as "kept, not moved".
-    dropped = [s["id"] for s in segments if s["id"] not in seen]
-    plan["order"] = deduped + dropped
-    plan["dropped_by_model"] = [i for i in (plan.get("order") or []) if i not in deduped]
+    topics_in = plan.get("topics") or []
+    topics, assigned = [], set()
+    for t in topics_in:
+        ids = []
+        for i in (t.get("segment_ids") or []):
+            if i in valid_set and i not in assigned:
+                assigned.add(i); ids.append(i)
+        if ids:
+            topics.append({"title": (t.get("title") or "Topic").strip(),
+                           "segment_ids": ids,
+                           "why": (t.get("why") or "").strip()})
 
-    keep = lambda i: i in valid_ids
+    # any segment the model forgot → keep it (original order) in an "Other" topic
+    leftover = [i for i in valid_ids if i not in assigned]
+    if leftover:
+        topics.append({"title": "Other", "segment_ids": leftover,
+                       "why": "Segments the model did not group — kept in original order."})
+
+    plan["topics"] = topics
+    plan["order"]  = [i for t in topics for i in t["segment_ids"]]
+
+    keep = lambda i: i in valid_set
     plan["broll"]  = [b for b in (plan.get("broll")  or []) if keep(b.get("after_segment"))]
     plan["pacing"] = [p for p in (plan.get("pacing") or []) if keep(p.get("after_segment"))]
     if not isinstance(plan.get("warnings"), list):
         plan["warnings"] = []
     plan.setdefault("notes", "")
     plan.setdefault("hook", {})
-    plan["reordered"] = plan["order"] != [s["id"] for s in segments]
+    plan["reordered"] = plan["order"] != valid_ids
     return plan
