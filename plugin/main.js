@@ -1451,6 +1451,71 @@ function listAllMethods(obj) {
 
 let lastEditReport = null;
 
+// Deep-probe the effects/keyframe API: walk a clip's component chain → the
+// Motion component → its params (Scale/Position) → their keyframe methods.
+async function probeMotion(items) {
+  const statics = (c) => c ? Object.getOwnPropertyNames(c).filter(n => { try { return typeof c[n] === "function"; } catch (_) { return false; } }).sort() : [];
+  const dump = (c) => ({ statics: statics(c), proto: c ? listAllMethods(c) : [] });
+  const M = { classes: {
+    VideoComponentChain: dump(ppro.VideoComponentChain),
+    Component:           dump(ppro.Component),
+    ComponentFactory:    dump(ppro.ComponentFactory),
+    VideoFilterFactory:  dump(ppro.VideoFilterFactory),
+    VideoFilterComponent:dump(ppro.VideoFilterComponent),
+    Keyframe:            dump(ppro.Keyframe),
+    PointKeyframe:       dump(ppro.PointKeyframe),
+    Properties:          dump(ppro.Properties),
+  }};
+  try {
+    let item = null;
+    for (const it of items) { try { if (await it.getIsSelected()) { item = it; break; } } catch (_) {} }
+    if (!item) item = items[0];
+    M.clip = item ? await item.getName().catch(() => "?") : "(no clip)";
+    const chain = item && typeof item.getComponentChain === "function" ? await item.getComponentChain() : null;
+    M.chainMethods = chain ? listAllMethods(chain) : ["(no chain)"];
+
+    let count = 0;
+    const countName = ["getComponentCount", "getCount", "getComponentsCount"].find(n => chain && typeof chain[n] === "function");
+    if (countName) { try { count = await chain[countName](); } catch (_) {} }
+    M.componentCount = count; M.countName = countName || "(none)";
+    const getName = ["getComponentAtIndex", "getComponent", "getComponentAt"].find(n => chain && typeof chain[n] === "function");
+    M.componentGetter = getName || "(none)";
+
+    M.components = [];
+    if (chain && getName) {
+      for (let i = 0; i < Math.min(count || 6, 8); i++) {
+        try {
+          const comp = await chain[getName](i);
+          if (!comp) continue;
+          const mn = typeof comp.getMatchName === "function" ? await comp.getMatchName().catch(() => "") : "";
+          const nm = typeof comp.getName === "function" ? await comp.getName().catch(() => "") : "";
+          const info = { index: i, matchName: mn, name: nm, methods: listAllMethods(comp) };
+          let pc = 0;
+          const pcName = ["getParamCount", "getParameterCount", "getPropertyCount"].find(n => typeof comp[n] === "function");
+          if (pcName) { try { pc = await comp[pcName](); } catch (_) {} }
+          info.paramCount = pc; info.paramCountName = pcName || "(none)";
+          const pGet = ["getParam", "getParamAtIndex", "getParameter", "getProperty"].find(n => typeof comp[n] === "function");
+          info.paramGetter = pGet || "(none)";
+          if (pGet) {
+            info.params = [];
+            for (let p = 0; p < Math.min(pc || 10, 16); p++) {
+              try {
+                const prm = await comp[pGet](p);
+                if (!prm) continue;
+                const dn = typeof prm.getDisplayName === "function" ? await prm.getDisplayName().catch(() => "") : "";
+                const pn = typeof prm.getName === "function" ? await prm.getName().catch(() => "") : "";
+                info.params.push({ index: p, displayName: dn, name: pn, methods: listAllMethods(prm) });
+              } catch (_) {}
+            }
+          }
+          M.components.push(info);
+        } catch (_) {}
+      }
+    }
+  } catch (e) { M.error = e && e.message ? e.message : String(e); }
+  return M;
+}
+
 async function buildEditReport() {
   const project = await ppro.Project.getActiveProject();
   if (!project) throw new Error("No active project open.");
@@ -1484,7 +1549,8 @@ async function buildEditReport() {
     markersClassStatics,
     markerClassProto: markerClass,
     markerTypeEnum: (() => { try { return ppro.Constants && ppro.Constants.MarkerType ? JSON.parse(JSON.stringify(ppro.Constants.MarkerType)) : "(no Constants.MarkerType)"; } catch (_) { return "(unreadable)"; } })(),
-    lastMarkerError: lastMarkerError || "(none — try Add b-roll markers first)"
+    lastMarkerError: lastMarkerError || "(none — try Add b-roll markers first)",
+    motion: await probeMotion(items)
   };
   lastEditReport = report;
   return report;
