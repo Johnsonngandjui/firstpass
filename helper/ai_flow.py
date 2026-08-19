@@ -63,32 +63,54 @@ def model_ready() -> dict:
 
 
 # ── Transcript → reorderable segments ───────────────────────────────────────
-def segment_transcript(words: list[dict], min_pause: float = 0.6) -> list[dict]:
-    """Group words into sentence/beat segments (the unit we reorder). A segment
-    breaks at sentence-ending punctuation OR a real pause between words."""
-    segs, cur = [], []
+def segment_transcript(words: list[dict], hard_pause: float = 1.4,
+                       min_words: int = 4) -> list[dict]:
+    """Group words into FULL-SENTENCE segments (the unit we reorder). We break on
+    sentence-ending punctuation; a long pause is only a fallback break when a run
+    has grown without punctuation. Then any stray fragment (too short, or not a
+    complete sentence) is merged into its neighbour so every segment is a whole
+    thought — never a handful of loose words."""
+    groups, cur = [], []
     for i, w in enumerate(words):
         cur.append(w)
         text = (w.get("word") or "").strip()
         ends_sentence = text.endswith((".", "!", "?"))
         next_gap = (words[i + 1]["start"] - w["end"]) if i + 1 < len(words) else 999
-        if ends_sentence or next_gap >= min_pause:
-            if cur:
-                segs.append(cur)
-                cur = []
+        # split on a full sentence, or a big breath after enough words
+        if ends_sentence or (next_gap >= hard_pause and len(cur) >= min_words):
+            groups.append(cur)
+            cur = []
     if cur:
-        segs.append(cur)
+        groups.append(cur)
+
+    def gtext(g):
+        return " ".join((x.get("word") or "").strip() for x in g).strip()
+
+    # Merge fragments: a group that is too short OR doesn't end a sentence gets
+    # folded into the previous whole thought (or the next, if it's the first).
+    merged = []
+    for g in groups:
+        if not gtext(g):
+            continue
+        wc = len(gtext(g).split())
+        ends = gtext(g).rstrip().endswith((".", "!", "?"))
+        is_fragment = wc < min_words or not ends
+        if is_fragment and merged:
+            merged[-1] = merged[-1] + g          # fold into previous sentence
+        else:
+            merged.append(g)
+    # if the very first group was a fragment with nothing before it, fold forward
+    if len(merged) >= 2 and len(gtext(merged[0]).split()) < min_words:
+        merged[1] = merged[0] + merged[1]
+        merged.pop(0)
 
     out = []
-    for idx, group in enumerate(segs, start=1):
-        txt = " ".join((g.get("word") or "").strip() for g in group).strip()
-        if not txt:
-            continue
+    for idx, g in enumerate(merged, start=1):
         out.append({
             "id":    idx,
-            "start": round(group[0]["start"], 2),
-            "end":   round(group[-1]["end"], 2),
-            "text":  txt,
+            "start": round(g[0]["start"], 2),
+            "end":   round(g[-1]["end"], 2),
+            "text":  gtext(g),
         })
     return out
 
