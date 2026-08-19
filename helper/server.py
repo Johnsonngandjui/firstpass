@@ -871,7 +871,8 @@ def probe(req: ProbeRequest):
 @app.post("/debug_log")
 async def debug_log(request: Request):
     body = await request.json()
-    out = Path(tempfile.gettempdir()) / "clipcutter_debug.json"
+    # fixed path next to the server so it's easy to locate regardless of TMPDIR
+    out = Path(__file__).resolve().parent / "clipcutter_debug.json"
     out.write_text(json.dumps(body, indent=2), encoding="utf-8")
     return {"ok": True, "path": str(out)}
 

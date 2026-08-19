@@ -1507,6 +1507,14 @@ function renderDiagnostics(report) {
 async function runDiagnostics() {
   const report = await buildEditReport();
   renderDiagnostics(report);
+  // UXP blocks copy-paste from the panel, so also write the report to disk via
+  // the helper (helper/clipcutter_debug.json) for out-of-band inspection.
+  try {
+    await fetch(`${HELPER}/debug_log`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(report)
+    });
+  } catch (_) {}
   return report;
 }
 

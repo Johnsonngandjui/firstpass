@@ -28,7 +28,9 @@ def _chat(system: str, user: str, want_json: bool = True, timeout: int = 180) ->
             {"role": "user",   "content": user},
         ],
         "stream": False,
-        "options": {"temperature": 0.4},
+        # low temperature + fixed seed → the SAME clip gives the SAME arrangement
+        # every run (was flip-flopping between reorder / no-reorder before).
+        "options": {"temperature": 0.15, "seed": 7, "top_p": 0.9},
     }
     if want_json:
         payload["format"] = "json"
@@ -143,11 +145,14 @@ _SCHEMA_INSTRUCTIONS = """Return ONLY valid JSON with exactly this shape:
 Rules:
 - Every segment id MUST appear in exactly ONE topic's segment_ids. Never drop or
   duplicate a segment.
+- ALWAYS group by MEANING/theme, not by recording position — actively pull
+  related ideas together even when they were far apart in the recording. This
+  regrouping is the whole point; do not just echo the original order.
 - Use 2-5 topics. Order the topics to tell the best story; the FIRST segment of
   the FIRST topic is the hook.
 - Within a topic, order segments so they read naturally.
-- Group by MEANING/theme, not by original position — related ideas belong
-  together even if they were far apart in the recording.
+- Only keep the original order if the segments are ALREADY perfectly grouped by
+  topic — which is rare. Otherwise regroup.
 - Flag continuity risks (back-references like "as I said", tone/topic jumps)
   in "warnings". "after_segment" ids refer to segment ids.
 """
