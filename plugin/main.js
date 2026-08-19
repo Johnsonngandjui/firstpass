@@ -86,7 +86,7 @@ function showView(name) {
   $$(".view").forEach(v => v.classList.toggle("active", v.dataset.view === name));
   $$(".nav-item").forEach(n => n.classList.toggle("active", n.dataset.view === name));
   // Scope (Selected/Entire) only governs the cut passes — hide it where it's moot.
-  const noScope = name === "format" || name === "settings" || name === "review";
+  const noScope = name === "format" || name === "settings" || name === "review" || name === "flow";
   const gb = $("#global-bar");
   if (gb) gb.classList.toggle("hidden", noScope);
   $("#content").scrollTop = 0;
@@ -1054,6 +1054,111 @@ $$("[data-refresh]").forEach(b => b.addEventListener("click", () =>
     toast("Sequence info refreshed.");
   })
 ));
+
+// ── AI Flow (reorder / b-roll / pacing) ──────────────────────────
+let flowPlan = null, flowSegs = null;
+
+// The post-cleanup transcript = words NOT inside any enabled cut.
+function keptWords() {
+  const cuts = allCuts.filter(c => c.enabled);
+  return allWords.filter(w => !cuts.some(c => w.start >= c.startSec && w.start < c.endSec));
+}
+const segById = (id) => (flowSegs || []).find(s => s.id === id);
+
+async function planFlow() {
+  const words = keptWords();
+  if (!words.length) throw new Error("No transcript yet — run Master (or an analysis) first.");
+  const goal = ($("#flow-goal")?.value || "").trim();
+  const status = $("#flow-status");
+  status.className = "ai-status";
+  status.classList.remove("hidden");
+  status.textContent = "Planning with the local model… a long clip can take a minute.";
+  $("#flow-result").classList.add("hidden");
+
+  let resp;
+  try {
+    resp = await fetch(`${HELPER}/plan_flow`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ words, goal: goal || null })
+    });
+  } catch (e) { throw new Error("Helper not reachable — is the server running?"); }
+  if (!resp.ok) {
+    const e = await resp.json().catch(() => ({}));
+    status.className = "ai-status err";
+    status.textContent = e.detail || "AI Flow failed — check the local model in Settings.";
+    return;
+  }
+  const data = await resp.json();
+  if (!data.plan) { status.textContent = data.message || "Not enough distinct segments to reorder."; return; }
+  flowPlan = data.plan; flowSegs = data.segments;
+  status.classList.add("hidden");
+  renderFlowPlan(data);
+}
+
+function renderFlowPlan(data) {
+  const plan = data.plan, segs = data.segments;
+  const box = $("#flow-result");
+  const origOrder = segs.map(s => s.id);
+  const P = [];
+
+  if (plan.hook && plan.hook.segment_id) {
+    const h = segById(plan.hook.segment_id);
+    P.push(`<div class="flow-sec-title">Hook</div>`);
+    P.push(`<div class="flow-item hook"><b>Opens on:</b> “${escapeHtml(h ? h.text : "")}”<br>${escapeHtml(plan.hook.why || "")}</div>`);
+  }
+
+  P.push(`<div class="flow-sec-title">New order ${plan.reordered ? "· reordered" : "· unchanged"}</div>`);
+  plan.order.forEach((id, i) => {
+    const s = segById(id); if (!s) return;
+    const moved = origOrder[i] !== id;
+    P.push(
+      `<div class="flow-seg${moved ? " moved" : ""}">` +
+      `<span class="idx">${i + 1}</span>` +
+      `<span class="txt">${escapeHtml(s.text)}</span>` +
+      (moved ? `<span class="movedtag">was #${id}</span>` : "") +
+      `</div>`);
+  });
+
+  if (plan.broll && plan.broll.length) {
+    P.push(`<div class="flow-sec-title">B-roll (${plan.broll.length})</div>`);
+    for (const b of plan.broll) P.push(`<div class="flow-item">🎬 <b>${escapeHtml(b.idea || "")}</b><br>${escapeHtml(b.why || "")}</div>`);
+  }
+  if (plan.pacing && plan.pacing.length) {
+    P.push(`<div class="flow-sec-title">Pacing</div>`);
+    for (const p of plan.pacing) P.push(`<div class="flow-item"><b>${p.action === "pause" ? "Add pause" : "Tighten"} ${p.seconds || 0}s</b> — ${escapeHtml(p.why || "")}</div>`);
+  }
+  if (plan.warnings && plan.warnings.length) {
+    P.push(`<div class="flow-sec-title">Continuity warnings</div>`);
+    for (const w of plan.warnings) P.push(`<div class="flow-item warn">⚠ ${escapeHtml(w)}</div>`);
+  }
+  if (plan.notes) P.push(`<div class="flow-item">${escapeHtml(plan.notes)}</div>`);
+
+  P.push(`<div class="action-bar" style="margin-top:14px;">
+    <div class="btn secondary" id="flow-markers" role="button" tabindex="0">Add b-roll markers</div>
+    <span class="flex-spacer"></span>
+    <div class="btn primary" id="flow-apply" role="button" tabindex="0" title="Reorder engine coming next" style="opacity:.45;pointer-events:none;">Apply reorder (soon)</div>
+  </div>`);
+
+  box.innerHTML = P.join("");
+  box.classList.remove("hidden");
+
+  const mk = $("#flow-markers");
+  if (mk) mk.addEventListener("click", () => withBusy(mk, "Marking…", applyBrollMarkers));
+}
+
+async function applyBrollMarkers() {
+  const broll = (flowPlan && flowPlan.broll) || [];
+  if (!broll.length) { toast("No b-roll suggestions to mark."); return; }
+  const marks = broll.map(b => {
+    const s = segById(b.after_segment);
+    return s ? { startSec: s.end, type: "broll", label: "B-roll: " + (b.idea || "") } : null;
+  }).filter(Boolean);
+  const n = await addTimelineMarkers(marks);
+  toast(n ? `Added ${n} b-roll marker${n === 1 ? "" : "s"}.` : "Markers aren't supported on this build.");
+}
+
+const flowBtn = $("#flow-plan");
+if (flowBtn) flowBtn.addEventListener("click", () => withBusy(flowBtn, "Planning…", planFlow));
 
 // ── Helper status (Settings view) ────────────────────────────────
 async function checkHelper() {
