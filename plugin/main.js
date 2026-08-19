@@ -1220,7 +1220,9 @@ $$("[data-analyze]").forEach(b => b.addEventListener("click", () => {
   const kind = b.dataset.analyze;
   withBusy(b, "Working…", async () => {
     await runAnalyze(kind);
-    if (isOn("sw-markers") && allCuts.length) {
+    // "Add timeline markers" is a FILLER-tab option — only mark on the filler
+    // pass, never on Master/Silence/Repeats (those shouldn't drop markers).
+    if (kind === "filler" && isOn("sw-markers") && allCuts.length) {
       const m = await addTimelineMarkers(allCuts);
       if (m) toast(`Added ${m} timeline marker${m === 1 ? "" : "s"}.`);
     }
