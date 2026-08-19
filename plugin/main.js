@@ -940,10 +940,28 @@ async function applyReorder() {
   if (!flowPlan || !flowSegs || !flowPlan.order || !flowPlan.order.length)
     throw new Error("No arranged story to apply — run “Arrange story” first.");
 
-  const orderedSegs = flowPlan.order
-    .map(id => (flowSegs.find(s => s.id === id)))
-    .filter(Boolean)
-    .map(s => ({ start: s.start, end: s.end }));
+  // A segment's [start,end] SPANS the gaps Master removed (silences, fillers,
+  // earlier repeat takes). Placing the whole span from source would re-introduce
+  // that removed content and undo Master's cuts. So expand each segment into only
+  // its KEPT spans — the ranges left after subtracting the enabled cuts.
+  const cuts = allCuts.filter(c => c.enabled).slice().sort((a, b) => a.startSec - b.startSec);
+  const keptWithin = (s, e) => {
+    const spans = []; let cur = s;
+    for (const c of cuts) {
+      if (c.endSec <= s || c.startSec >= e) continue;      // no overlap with this segment
+      if (c.startSec > cur) spans.push({ start: cur, end: Math.min(c.startSec, e) });
+      cur = Math.max(cur, c.endSec);
+    }
+    if (cur < e) spans.push({ start: cur, end: e });
+    return spans.filter(sp => sp.end - sp.start > 0.03);
+  };
+
+  const orderedSegs = [];
+  for (const id of flowPlan.order) {
+    const s = flowSegs.find(x => x.id === id);
+    if (!s) continue;
+    for (const sp of keptWithin(s.start, s.end)) orderedSegs.push(sp);
+  }
   if (!orderedSegs.length) throw new Error("Nothing to assemble.");
 
   const app = ppro;
