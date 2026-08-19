@@ -1442,27 +1442,19 @@ async function getScaleParam(clip) {
   return null;
 }
 
-// Add one Scale keyframe (value at TickTime) trying several API shapes.
-// Returns the shape index that worked, or -1; pushes errors into `errs`.
+// Add one Scale keyframe (value at TickTime). PROBED: createKeyframe(value) →
+// set .position → createAddKeyframeAction(kf) is the shape this build honors.
 function addScaleKeyframeAction(compound, param, tt, value, errs) {
-  const shapes = [
-    // A: createKeyframe(value) → set time on it → createAddKeyframeAction(kf)
-    () => { const kf = param.createKeyframe(value); if (!kf) return null;
-            try { kf.position = tt; } catch (_) {} try { kf.time = tt; } catch (_) {}
-            return param.createAddKeyframeAction(kf); },
-    // B: createAddKeyframeAction(time, value)
-    () => param.createAddKeyframeAction(tt, value),
-    // C: createKeyframe(time, value) → add
-    () => { const kf = param.createKeyframe(tt, value); return kf ? param.createAddKeyframeAction(kf) : null; },
-    // D: setValue at time (auto-keyframes when time-varying)
-    () => param.createSetValueAction(value, tt),
-    // E: createSetValueAction(keyframeObj)
-    () => { const kf = param.createKeyframe(value); if (!kf) return null; try { kf.position = tt; } catch (_) {} return param.createSetValueAction(kf); },
-  ];
-  for (let i = 0; i < shapes.length; i++) {
-    try { const a = shapes[i](); if (a) { compound.addAction(a); return i; } }
-    catch (e) { errs[i] = (e && e.message ? e.message : String(e)); }
-  }
+  try {
+    const kf = param.createKeyframe(value);
+    if (!kf) { errs[0] = "createKeyframe returned null"; return -1; }
+    try { kf.value = value; } catch (_) {}      // belt-and-suspenders
+    try { kf.position = tt; } catch (_) {}
+    try { kf.time = tt; } catch (_) {}
+    const a = param.createAddKeyframeAction(kf);
+    if (a) { compound.addAction(a); return 0; }
+    errs[0] = "createAddKeyframeAction returned null";
+  } catch (e) { errs[0] = (e && e.message ? e.message : String(e)); }
   return -1;
 }
 
@@ -1556,8 +1548,13 @@ async function applyScaleKeyframes(clip, kfList) {
   const mkTT = (s) => ppro.TickTime.createWithSeconds(s);
   const scale = await getScaleParam(clip);
   if (!scale) return { ok: false, error: "no Scale param" };
+  // Clear any stale keyframes (repeated tests leave them, which stack/interfere):
+  // toggling time-varying off then on resets the param, then we add fresh.
   await project.lockedAccess(() => {
-    project.executeTransaction((c) => { c.addAction(scale.createSetTimeVaryingAction(true)); }, "AI Edit: enable Scale keyframes");
+    project.executeTransaction((c) => { try { c.addAction(scale.createSetTimeVaryingAction(false)); } catch (_) {} }, "AI Edit: clear keyframes");
+  });
+  await project.lockedAccess(() => {
+    project.executeTransaction((c) => { c.addAction(scale.createSetTimeVaryingAction(true)); }, "AI Edit: enable keyframes");
   });
   const errs = []; let used = -1;
   await project.lockedAccess(() => {
@@ -1565,31 +1562,19 @@ async function applyScaleKeyframes(clip, kfList) {
       for (const [t, v] of kfList) { const s = addScaleKeyframeAction(c, scale, mkTT(Math.max(0, t)), v, errs); if (s >= 0) used = s; }
     }, "AI Edit: keyframes");
   });
-  if (used < 0) return { ok: false, error: "kf failed → " + errs.map((m, i) => `[${i}] ${m}`).filter(Boolean).join(" | ") };
-  // Read back the keyframes so the caller can VERIFY they landed where intended.
-  let placed = [];
+  if (used < 0) return { ok: false, error: "kf failed → " + errs.filter(Boolean).join(" | ") };
+  // Read back actual VALUES at each keyframe time → proves the scale animates.
+  let values = [];
   try {
-    const list = await scale.getKeyframeListAsTickTimes();
-    placed = (list || []).map(t => (t && t.seconds != null) ? +t.seconds.toFixed(2) : t);
+    for (const [t] of kfList) { const vo = await scale.getValueAtTime(mkTT(Math.max(0, t))); values.push((vo && vo.value != null) ? +(+vo.value).toFixed(1) : "?"); }
   } catch (_) {}
-  return { ok: true, shape: used, wanted: kfList.map(k => +k[0].toFixed(2)), placed };
+  return { ok: true, wanted: kfList.map(k => k[1]), values };
 }
 
-// A move → concrete keyframes on the clip's timeline range [cs, cs+cd].
-function moveKeyframes(cs, cd, m) {
-  const end = cs + cd, from = m.from ?? 100, to = m.to ?? 100;
-  const ramp = Math.min(0.25, cd * 0.25), hold = Math.min(0.4, cd * 0.35);
-  const at = cs + cd * (m.at_frac ?? 0.3);
-  switch (m.move) {
-    case "slow_push":
-    case "ease_out":   return [[cs + 0.05, from], [end - 0.05, to]];
-    case "hold_close": return [[cs + 0.02, 100], [cs + Math.min(0.5, cd * 0.4), to]];   // ease in & hold
-    case "punch_in":   return [[at - ramp, from], [at, to], [at + hold, to], [at + hold + ramp, from]];
-    default:           return [];   // static → no motion
-  }
-}
-
-// Enumerate timeline video clips (L→R) as "shots" with their spoken text.
+// Enumerate timeline video clips, GROUPED into sentence "shots". Cut footage is
+// many micro-clips (one per removed silence); a camera move should span the
+// whole sentence, not restart on every fragment. We group consecutive clips
+// until one ends a sentence (. ! ?).
 async function gatherShots(sequence) {
   const CLIP = ppro.Constants?.TrackItemType?.Clip ?? 1;
   let vCount = 1; try { vCount = await sequence.getVideoTrackCount(); } catch (_) {}
@@ -1602,17 +1587,62 @@ async function gatherShots(sequence) {
       try { const s = await it.getStartTime(); st = s ? s.seconds : 0; } catch (_) {}
       try { const d = await it.getDuration();  du = d ? d.seconds : 0; } catch (_) {}
       try { const p = await it.getInPoint();   si = p ? p.seconds : 0; } catch (_) {}
-      clips.push({ it, start: st, dur: du, srcIn: si });
+      const words = allWords.filter(w => w.start >= si - 0.05 && w.start < si + du + 0.05);
+      clips.push({ it, start: st, dur: du, srcIn: si, words });
     }
   }
   clips.sort((a, b) => a.start - b.start);
-  return clips.map((c, idx) => {
-    const words = allWords.filter(w => w.start >= c.srcIn - 0.05 && w.start < c.srcIn + c.dur + 0.05);
-    const text = words.map(w => w.word).join(" ").trim();
-    // _srcIn is the base for keyframes — clip-effect keyframes live in SOURCE
-    // (media) time, not sequence time.
-    return { i: idx, seconds: +c.dur.toFixed(2), text, _clip: c.it, _start: c.start, _dur: c.dur, _srcIn: c.srcIn };
+
+  const groups = []; let cur = [];
+  for (const c of clips) {
+    cur.push(c);
+    const lw = c.words[c.words.length - 1];
+    const endsSentence = lw && /[.!?]$/.test((lw.word || "").trim());
+    if (endsSentence) { groups.push(cur); cur = []; }
+  }
+  if (cur.length) groups.push(cur);
+
+  return groups.map((g, idx) => {
+    const text = g.flatMap(c => c.words).map(w => w.word).join(" ").trim();
+    const dur = g.reduce((s, c) => s + c.dur, 0);
+    return {
+      i: idx, seconds: +dur.toFixed(2), text, _dur: dur,
+      _clips: g.map(c => ({ it: c.it, dur: c.dur, srcIn: c.srcIn })),
+    };
   });
+}
+
+// Apply a move ACROSS a shot's clips — the scale ramp is distributed over the
+// whole sentence so it reads as one continuous camera move.
+async function applyMoveToShot(shot, m) {
+  const clips = shot._clips, D = shot._dur || clips.reduce((s, c) => s + c.dur, 0) || 1;
+  const from = m.from ?? 100, to = m.to ?? 100;
+  const results = [];
+
+  if (m.move === "slow_push" || m.move === "ease_out") {
+    const val = (p) => from + (to - from) * Math.max(0, Math.min(1, p));
+    let off = 0;
+    for (const c of clips) {
+      const kf = [[c.srcIn + 0.02, val(off / D)], [c.srcIn + Math.max(0.1, c.dur - 0.02), val((off + c.dur) / D)]];
+      results.push(await applyScaleKeyframes(c.it, kf)); off += c.dur;
+    }
+  } else if (m.move === "hold_close") {
+    for (let k = 0; k < clips.length; k++) {
+      const c = clips[k];
+      const kf = k === 0 ? [[c.srcIn + 0.02, 100], [c.srcIn + Math.max(0.1, c.dur - 0.02), to]]
+                         : [[c.srcIn + 0.02, to], [c.srcIn + Math.max(0.1, c.dur - 0.02), to]];
+      results.push(await applyScaleKeyframes(c.it, kf));
+    }
+  } else if (m.move === "punch_in") {
+    const target = D * (m.at_frac ?? 0.3);
+    let acc = 0, pc = clips[0], pcAcc = 0;
+    for (const c of clips) { if (target >= acc && target < acc + c.dur) { pc = c; pcAcc = acc; break; } acc += c.dur; }
+    const local = Math.max(0.1, Math.min(pc.dur - 0.1, target - pcAcc));
+    const ramp = Math.min(0.2, pc.dur * 0.25), hold = Math.min(0.3, pc.dur * 0.3);
+    const at = pc.srcIn + local;
+    results.push(await applyScaleKeyframes(pc.it, [[at - ramp, from], [at, to], [at + hold, to], [at + hold + ramp, from]]));
+  }
+  return results;
 }
 
 let editShots = null, editPlan = null;
@@ -1676,32 +1706,30 @@ async function applyEditPlan() {
   let done = 0, applied = 0, failed = "", verify = null;
   for (const m of withMotion) {
     const s = editShots.find(x => x.i === m.i); if (!s) continue;
-    // keyframes in SOURCE time: base at the clip's in-point, span [srcIn, srcIn+dur]
-    const kf = moveKeyframes(s._srcIn, s._dur, m);
-    const r = await applyScaleKeyframes(s._clip, kf);
-    if (r.ok && !r.skipped) {
+    // spread the move across the sentence's clips (keyframes in SOURCE time)
+    const rs = (await applyMoveToShot(s, m)).filter(Boolean);
+    const okOne = rs.find(r => r.ok && !r.skipped);
+    if (okOne) {
       applied++;
-      // verify against the FIRST applied shot: keyframes must sit inside the clip
       if (!verify) {
-        const lo = s._srcIn - 0.1, hi = s._srcIn + s._dur + 0.1;
-        const inRange = (r.placed || []).filter(t => t >= lo && t <= hi).length;
-        verify = { i: m.i, srcIn: +s._srcIn.toFixed(2), dur: +s._dur.toFixed(2), placed: r.placed, inRange, total: (r.placed || []).length };
+        const vals = okOne.values || [];
+        const animated = new Set(vals.map(v => Math.round(v))).size > 1 || m.move === "hold_close";
+        verify = { i: m.i, move: m.move, wanted: okOne.wanted, values: vals, animated };
       }
-    } else if (!r.ok && !failed) failed = r.error;
+    } else { const bad = rs.find(r => !r.ok); if (bad && !failed) failed = bad.error; }
     done++;
     overlayProgress(6 + done / (withMotion.length || 1) * 94, `Shot ${done} of ${withMotion.length}`, `${done}/${withMotion.length}`);
     await sleep(120);
   }
   overlayHide();
 
-  // Surface the read-back verification in the status area so we KNOW it worked.
+  // Surface the value read-back so we KNOW the scale actually animates.
   const st = $("#edit-status"); st.classList.remove("hidden");
   if (applied && verify) {
-    const ok = verify.inRange >= 2;
-    st.className = ok ? "ai-status" : "ai-status err";
-    st.textContent = (ok ? "✅ " : "⚠️ ") +
-      `Applied ${applied} move${applied === 1 ? "" : "s"}. Shot ${verify.i + 1}: clip source ${verify.srcIn}–${(verify.srcIn + verify.dur).toFixed(2)}s, keyframes at [${(verify.placed || []).join(", ")}] — ${verify.inRange}/${verify.total} inside the clip.` +
-      (ok ? "" : " Keyframes landed OUTSIDE the clip range — wrong time base.");
+    st.className = verify.animated ? "ai-status" : "ai-status err";
+    st.textContent = (verify.animated ? "✅ " : "⚠️ ") +
+      `Applied ${applied} move${applied === 1 ? "" : "s"}. Shot ${verify.i + 1} (${verify.move}): wanted [${(verify.wanted || []).join(", ")}] → got [${(verify.values || []).join(", ")}].` +
+      (verify.animated ? " Scale animates ✓" : " Values didn't change — keyframe value not applied.");
   } else {
     st.className = "ai-status err";
     st.textContent = "No moves applied" + (failed ? " — " + failed : ".");
