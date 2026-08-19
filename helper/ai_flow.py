@@ -239,8 +239,8 @@ _EDIT_SCHEMA = """Return ONLY valid JSON:
   "shots": [
     {"i": <shot index>,
      "move": "static" | "slow_push" | "punch_in" | "hold_close" | "ease_out",
-     "from": <start scale %, 100-116>,
-     "to":   <end scale %, 100-116>,
+     "from": <start scale %, 100-122>,
+     "to":   <end scale %, 100-122>,
      "at_frac": <0.0-1.0, only for punch_in: where in the shot the punch lands>,
      "why": "<one short reason>"}
   ],
@@ -249,20 +249,21 @@ _EDIT_SCHEMA = """Return ONLY valid JSON:
 
 Move meanings:
 - static     : hold at 100%. THE DEFAULT for most shots.
-- slow_push  : slow gentle zoom IN across the shot (from~100 to~104-108). Use on
-               a building thought or an emotional/personal beat.
-- punch_in   : a quick snap zoom on ONE key/emphatic word (to~110-114), then it
-               eases back. Use SPARINGLY, only on a real punchline or key word.
-- hold_close : sit slightly zoomed in and hold (~104-108). Use on an intimate or
-               intense confession.
-- ease_out   : slow zoom OUT (from~106 to 100). Use to release tension / wind down.
+- slow_push  : slow zoom IN across the shot (from~100 to~108-112). Use on a
+               building thought or an emotional/personal beat.
+- punch_in   : a quick snap zoom on ONE key/emphatic word (to~113-118), then it
+               HOLDS at that scale to the end of the sentence (it does NOT zoom
+               back out). Use SPARINGLY, only on a real punchline or key word.
+- hold_close : sit zoomed in and hold (~108-112). Use on an intimate or intense
+               confession.
+- ease_out   : slow zoom OUT (from~110 to 100). Use to release tension / wind down.
 
 Rules:
 - MOST shots must be "static". Give a real move to at most ~40% of shots.
 - Never put two strong moves (punch_in / hold_close) back-to-back — separate them
   with static or a slow move so the video breathes.
-- Keep it subtle: pushes +4 to +8%, punches to +10 to +14%, holds +4 to +8%.
-  Never exceed 116%.
+- Amounts: pushes +8 to +12%, punches to +13 to +18%, holds +8 to +12%. These
+  should be VISIBLE but smooth. Never exceed 122%.
 - Reset toward 100% on a new topic / establishing line.
 - Every shot index MUST appear exactly once. Vary moves so it feels intentional
   and cinematic — not gimmicky.
@@ -297,9 +298,9 @@ def _validate_edit(plan: dict, shots: list[dict]) -> dict:
         if i not in valid or i in by_i:
             continue
         mv = sh.get("move") if sh.get("move") in moves else "static"
-        try: frm = clamp(float(sh.get("from", 100)), 100, 116)
+        try: frm = clamp(float(sh.get("from", 100)), 100, 122)
         except Exception: frm = 100.0
-        try: to = clamp(float(sh.get("to", 100)), 100, 116)
+        try: to = clamp(float(sh.get("to", 100)), 100, 122)
         except Exception: to = 100.0
         if mv == "static": frm = to = 100.0
         try: af = clamp(float(sh.get("at_frac", 0.3)), 0.0, 1.0)

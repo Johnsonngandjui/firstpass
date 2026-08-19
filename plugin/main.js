@@ -1616,7 +1616,13 @@ async function gatherShots(sequence) {
 // whole sentence so it reads as one continuous camera move.
 async function applyMoveToShot(shot, m) {
   const clips = shot._clips, D = shot._dur || clips.reduce((s, c) => s + c.dur, 0) || 1;
-  const from = m.from ?? 100, to = m.to ?? 100;
+  const from = m.from ?? 100;
+  let to = m.to ?? 100;
+  // Amplify so the motion is actually FELT (the model tends conservative), then cap.
+  if (m.move === "slow_push" || m.move === "ease_out") { const dir = to >= from ? 1 : -1; if (Math.abs(to - from) < 7) to = from + dir * 8; }
+  else if (m.move === "punch_in") { if (to - from < 12) to = from + 14; }
+  else if (m.move === "hold_close") { if (to - 100 < 7) to = 108; }
+  to = Math.min(124, Math.max(96, to));
   const results = [];
 
   if (m.move === "slow_push" || m.move === "ease_out") {
@@ -1634,13 +1640,25 @@ async function applyMoveToShot(shot, m) {
       results.push(await applyScaleKeyframes(c.it, kf));
     }
   } else if (m.move === "punch_in") {
-    const target = D * (m.at_frac ?? 0.3);
-    let acc = 0, pc = clips[0], pcAcc = 0;
-    for (const c of clips) { if (target >= acc && target < acc + c.dur) { pc = c; pcAcc = acc; break; } acc += c.dur; }
-    const local = Math.max(0.1, Math.min(pc.dur - 0.1, target - pcAcc));
-    const ramp = Math.min(0.2, pc.dur * 0.25), hold = Math.min(0.3, pc.dur * 0.3);
-    const at = pc.srcIn + local;
-    results.push(await applyScaleKeyframes(pc.it, [[at - ramp, from], [at, to], [at + hold, to], [at + hold + ramp, from]]));
+    // Quick zoom in at the emphasis point, then HOLD at the peak to the end of
+    // the sentence (no snap back out — that looked wrong).
+    const target = D * (m.at_frac ?? 0.25);
+    let acc = 0, pcIdx = 0, pcAcc = 0;
+    for (let k = 0; k < clips.length; k++) { const c = clips[k]; if (target >= acc && target < acc + c.dur) { pcIdx = k; pcAcc = acc; break; } acc += c.dur; }
+    const ramp = 0.16;
+    for (let k = 0; k < clips.length; k++) {
+      const c = clips[k];
+      if (k < pcIdx) continue;                                  // before the punch → stay at 100
+      let kf;
+      if (k === pcIdx) {
+        const local = Math.max(0.05, Math.min(c.dur - 0.05, target - pcAcc));
+        const at = c.srcIn + local;
+        kf = [[c.srcIn + 0.02, from], [Math.max(c.srcIn + 0.04, at - ramp), from], [at, to], [c.srcIn + Math.max(0.1, c.dur - 0.02), to]];
+      } else {
+        kf = [[c.srcIn + 0.02, to], [c.srcIn + Math.max(0.1, c.dur - 0.02), to]];   // hold the punch
+      }
+      results.push(await applyScaleKeyframes(c.it, kf));
+    }
   }
   return results;
 }
