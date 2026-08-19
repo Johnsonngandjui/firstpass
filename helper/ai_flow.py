@@ -222,3 +222,96 @@ def _validate_plan(plan: dict, segments: list[dict]) -> dict:
     plan.setdefault("hook", {})
     plan["reordered"] = plan["order"] != valid_ids
     return plan
+
+
+# ── AI Edit: cinematography (per-shot camera move) ──────────────────────────
+_EDIT_SYSTEM = (
+    "You are a cinematographer for short-form talking-head video. You are given "
+    "the ordered SHOTS of an edit — each shot is one continuous clip with its "
+    "spoken text and duration. For each shot you choose ONE subtle camera move "
+    "(scale only) that serves the content and holds attention, WITHOUT overdoing "
+    "it. Restraint is the craft: most shots stay static; motion is earned. You "
+    "never invent content; you only choose moves."
+)
+
+_EDIT_SCHEMA = """Return ONLY valid JSON:
+{
+  "shots": [
+    {"i": <shot index>,
+     "move": "static" | "slow_push" | "punch_in" | "hold_close" | "ease_out",
+     "from": <start scale %, 100-116>,
+     "to":   <end scale %, 100-116>,
+     "at_frac": <0.0-1.0, only for punch_in: where in the shot the punch lands>,
+     "why": "<one short reason>"}
+  ],
+  "notes": "<one sentence on the overall visual rhythm>"
+}
+
+Move meanings:
+- static     : hold at 100%. THE DEFAULT for most shots.
+- slow_push  : slow gentle zoom IN across the shot (from~100 to~104-108). Use on
+               a building thought or an emotional/personal beat.
+- punch_in   : a quick snap zoom on ONE key/emphatic word (to~110-114), then it
+               eases back. Use SPARINGLY, only on a real punchline or key word.
+- hold_close : sit slightly zoomed in and hold (~104-108). Use on an intimate or
+               intense confession.
+- ease_out   : slow zoom OUT (from~106 to 100). Use to release tension / wind down.
+
+Rules:
+- MOST shots must be "static". Give a real move to at most ~40% of shots.
+- Never put two strong moves (punch_in / hold_close) back-to-back — separate them
+  with static or a slow move so the video breathes.
+- Keep it subtle: pushes +4 to +8%, punches to +10 to +14%, holds +4 to +8%.
+  Never exceed 116%.
+- Reset toward 100% on a new topic / establishing line.
+- Every shot index MUST appear exactly once. Vary moves so it feels intentional
+  and cinematic — not gimmicky.
+"""
+
+
+def plan_edit(shots: list[dict]) -> dict:
+    """shots: [{"i":int, "seconds":float, "text":str}] → per-shot camera moves."""
+    if not shots:
+        return {"shots": [], "notes": "No shots."}
+    lines = "\n".join(
+        f'[{s["i"]}] ({s.get("seconds", 0):.1f}s) "{s.get("text", "")}"' for s in shots
+    )
+    raw = _chat(_EDIT_SYSTEM, f"{_EDIT_SCHEMA}\nShots:\n{lines}", want_json=True)
+    try:
+        plan = json.loads(raw)
+    except json.JSONDecodeError:
+        a, b = raw.find("{"), raw.rfind("}")
+        if a == -1 or b == -1:
+            raise RuntimeError(f"Model did not return JSON. Got: {raw[:200]}")
+        plan = json.loads(raw[a:b + 1])
+    return _validate_edit(plan, shots)
+
+
+def _validate_edit(plan: dict, shots: list[dict]) -> dict:
+    valid = {s["i"] for s in shots}
+    moves = {"static", "slow_push", "punch_in", "hold_close", "ease_out"}
+    clamp = lambda v, lo, hi: max(lo, min(hi, v))
+    by_i, out = {}, []
+    for sh in (plan.get("shots") or []):
+        i = sh.get("i")
+        if i not in valid or i in by_i:
+            continue
+        mv = sh.get("move") if sh.get("move") in moves else "static"
+        try: frm = clamp(float(sh.get("from", 100)), 100, 116)
+        except Exception: frm = 100.0
+        try: to = clamp(float(sh.get("to", 100)), 100, 116)
+        except Exception: to = 100.0
+        if mv == "static": frm = to = 100.0
+        try: af = clamp(float(sh.get("at_frac", 0.3)), 0.0, 1.0)
+        except Exception: af = 0.3
+        rec = {"i": i, "move": mv, "from": round(frm, 1), "to": round(to, 1),
+               "at_frac": round(af, 2), "why": (sh.get("why") or "").strip()}
+        by_i[i] = rec; out.append(rec)
+    # any shot the model skipped → static
+    for s in shots:
+        if s["i"] not in by_i:
+            out.append({"i": s["i"], "move": "static", "from": 100.0, "to": 100.0, "at_frac": 0.3, "why": ""})
+    out.sort(key=lambda r: r["i"])
+    plan["shots"] = out
+    plan.setdefault("notes", "")
+    return plan

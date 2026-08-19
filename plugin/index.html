@@ -1021,15 +1021,16 @@ body {
           <p>Emphasis zooms on key moments, pacing, and space for b-roll — motion that keeps viewers watching.</p>
         </header>
 
-        <div class="card compact">
-          <p class="hint-note" style="margin:0;">First we're validating keyframes on this build. Select a clip on the timeline, then run the test — it should add a subtle scale punch-in in the middle of the clip.</p>
-          <div class="action-bar" style="margin-top:4px;">
-            <span class="flex-spacer"></span>
-            <div class="btn secondary" id="edit-test-zoom" role="button" tabindex="0">Test punch-in on selected clip</div>
-          </div>
+        <p class="hint-note">Reads your timeline shots (needs a prior <b>Master</b>/analysis for the words) and picks a subtle camera move per shot — mostly static, with pushes, punch-ins and holds where they earn it. Reviewed before applying. <span style="opacity:.7;">(Undo with Cmd+Z.)</span></p>
+
+        <div class="action-bar">
+          <div class="link-btn" id="edit-test-zoom" role="button" tabindex="0">Test punch-in</div>
+          <span class="flex-spacer"></span>
+          <div class="btn primary" id="edit-plan" role="button" tabindex="0">Plan cinematography</div>
         </div>
 
         <div id="edit-status" class="ai-status hidden"></div>
+        <div id="edit-result" class="hidden"></div>
       </section>
 
       <!-- ── Settings ───────────────────────────────────────── -->

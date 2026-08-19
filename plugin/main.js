@@ -1516,9 +1516,144 @@ if (editTestBtn) editTestBtn.addEventListener("click", () => withBusy(editTestBt
   try { const d = await clip.getDuration(); cd = d ? d.seconds : 0; } catch (_) {}
   const at = cs + Math.min(cd * 0.5, 1.2);
   const r = await emphasisZoom(clip, at, { peak: 112, hold: 0.4, ramp: 0.25 });
-  if (r.ok) { st.className = "ai-status"; st.textContent = `✅ Punch-in added (shape ${r.shape}). Scrub the clip to see the zoom. If it looks right, I'll wire the AI to place these automatically.`; }
+  if (r.ok) { st.className = "ai-status"; st.textContent = `✅ Punch-in added (shape ${r.shape}). Scrub the clip to see the zoom.`; }
   else { st.className = "ai-status err"; st.textContent = "Keyframe failed → " + r.error; }
 }));
+
+// Generic scale-keyframe writer (used by AI Edit moves). kfList: [[timelineSec, scale%]].
+async function applyScaleKeyframes(clip, kfList) {
+  if (!kfList.length) return { ok: true, skipped: true };
+  const project = await ppro.Project.getActiveProject();
+  const mkTT = (s) => ppro.TickTime.createWithSeconds(s);
+  const scale = await getScaleParam(clip);
+  if (!scale) return { ok: false, error: "no Scale param" };
+  await project.lockedAccess(() => {
+    project.executeTransaction((c) => { c.addAction(scale.createSetTimeVaryingAction(true)); }, "AI Edit: enable Scale keyframes");
+  });
+  const errs = []; let used = -1;
+  await project.lockedAccess(() => {
+    project.executeTransaction((c) => {
+      for (const [t, v] of kfList) { const s = addScaleKeyframeAction(c, scale, mkTT(Math.max(0, t)), v, errs); if (s >= 0) used = s; }
+    }, "AI Edit: keyframes");
+  });
+  if (used < 0) return { ok: false, error: "kf failed → " + errs.map((m, i) => `[${i}] ${m}`).filter(Boolean).join(" | ") };
+  return { ok: true };
+}
+
+// A move → concrete keyframes on the clip's timeline range [cs, cs+cd].
+function moveKeyframes(cs, cd, m) {
+  const end = cs + cd, from = m.from ?? 100, to = m.to ?? 100;
+  const ramp = Math.min(0.25, cd * 0.25), hold = Math.min(0.4, cd * 0.35);
+  const at = cs + cd * (m.at_frac ?? 0.3);
+  switch (m.move) {
+    case "slow_push":
+    case "ease_out":   return [[cs + 0.05, from], [end - 0.05, to]];
+    case "hold_close": return [[cs + 0.02, 100], [cs + Math.min(0.5, cd * 0.4), to]];   // ease in & hold
+    case "punch_in":   return [[at - ramp, from], [at, to], [at + hold, to], [at + hold + ramp, from]];
+    default:           return [];   // static → no motion
+  }
+}
+
+// Enumerate timeline video clips (L→R) as "shots" with their spoken text.
+async function gatherShots(sequence) {
+  const CLIP = ppro.Constants?.TrackItemType?.Clip ?? 1;
+  let vCount = 1; try { vCount = await sequence.getVideoTrackCount(); } catch (_) {}
+  const clips = [];
+  for (let vt = 0; vt < vCount; vt++) {
+    const trk = await sequence.getVideoTrack(vt).catch(() => null);
+    if (!trk) continue;
+    for (const it of (await trk.getTrackItems(CLIP, false) || [])) {
+      let st = 0, du = 0, si = 0;
+      try { const s = await it.getStartTime(); st = s ? s.seconds : 0; } catch (_) {}
+      try { const d = await it.getDuration();  du = d ? d.seconds : 0; } catch (_) {}
+      try { const p = await it.getInPoint();   si = p ? p.seconds : 0; } catch (_) {}
+      clips.push({ it, start: st, dur: du, srcIn: si });
+    }
+  }
+  clips.sort((a, b) => a.start - b.start);
+  return clips.map((c, idx) => {
+    const words = allWords.filter(w => w.start >= c.srcIn - 0.05 && w.start < c.srcIn + c.dur + 0.05);
+    const text = words.map(w => w.word).join(" ").trim();
+    return { i: idx, seconds: +c.dur.toFixed(2), text, _clip: c.it, _start: c.start, _dur: c.dur };
+  });
+}
+
+let editShots = null, editPlan = null;
+const MOVE_LABEL = { static: "Static", slow_push: "Slow push-in", punch_in: "Punch-in", hold_close: "Hold close", ease_out: "Ease out" };
+
+async function planEdit() {
+  const project = await ppro.Project.getActiveProject();
+  const sequence = project && await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence — open your timeline.");
+  const shots = await gatherShots(sequence);
+  if (!shots.length) throw new Error("No clips on the timeline.");
+  editShots = shots;
+  const st = $("#edit-status"); st.className = "ai-status"; st.classList.remove("hidden");
+  st.textContent = "Planning the cinematography… a moment.";
+  $("#edit-result").classList.add("hidden");
+
+  let resp;
+  try {
+    resp = await fetch(`${HELPER}/plan_edit`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ shots: shots.map(s => ({ i: s.i, seconds: s.seconds, text: s.text })) })
+    });
+  } catch (e) { throw new Error("Helper not reachable — is the server running?"); }
+  if (!resp.ok) { const e = await resp.json().catch(() => ({})); st.className = "ai-status err"; st.textContent = e.detail || "AI Edit failed — check the local model in Settings."; return; }
+  editPlan = await resp.json();
+  st.classList.add("hidden");
+  renderEditPlan();
+}
+
+function renderEditPlan() {
+  const box = $("#edit-result");
+  const shotById = {}; for (const s of editShots) shotById[s.i] = s;
+  const moves = (editPlan.shots || []);
+  const active = moves.filter(m => m.move !== "static").length;
+  const P = [`<div class="flow-sec-title">Camera moves · ${active} of ${moves.length} shots</div>`];
+  for (const m of moves) {
+    const s = shotById[m.i]; if (!s) continue;
+    const isStatic = m.move === "static";
+    const range = isStatic ? "100%" : `${m.from}→${m.to}%`;
+    P.push(
+      `<div class="flow-seg${isStatic ? "" : " moved"}">` +
+      `<span class="idx">${m.i + 1}</span>` +
+      `<span class="txt"><b>${MOVE_LABEL[m.move] || m.move}</b> · ${range}` +
+      (m.why ? `<br><span style="color:var(--text-dim);font-size:11.5px;">${escapeHtml(m.why)}</span>` : "") +
+      `<br><span style="color:var(--text-mute);font-size:11px;">“${escapeHtml((s.text || "").slice(0, 90))}”</span></span>` +
+      `</div>`);
+  }
+  if (editPlan.notes) P.push(`<div class="flow-item">${escapeHtml(editPlan.notes)}</div>`);
+  P.push(`<div class="action-bar" style="margin-top:14px;"><span class="flex-spacer"></span><div class="btn primary" id="edit-apply" role="button" tabindex="0">Apply moves</div></div>`);
+  box.innerHTML = P.join("");
+  box.classList.remove("hidden");
+  const ap = $("#edit-apply");
+  if (ap) ap.addEventListener("click", () => withBusy(ap, "Applying…", applyEditPlan));
+}
+
+async function applyEditPlan() {
+  if (!editPlan || !editShots) throw new Error("Plan first.");
+  overlayShow("Adding camera moves");
+  const moves = editPlan.shots || [];
+  const withMotion = moves.filter(m => m.move !== "static");
+  let done = 0, applied = 0, failed = "";
+  for (const m of withMotion) {
+    const s = editShots.find(x => x.i === m.i); if (!s) continue;
+    const kf = moveKeyframes(s._start, s._dur, m);
+    const r = await applyScaleKeyframes(s._clip, kf);
+    if (r.ok && !r.skipped) applied++;
+    else if (!r.ok && !failed) failed = r.error;
+    done++;
+    overlayProgress(6 + done / (withMotion.length || 1) * 94, `Shot ${done} of ${withMotion.length}`, `${done}/${withMotion.length}`);
+    await sleep(120);
+  }
+  overlayHide();
+  if (applied) toast(`Added ${applied} camera move${applied === 1 ? "" : "s"}. (Cmd+Z to undo.)`);
+  else toast("No moves applied" + (failed ? " — " + failed : "."), true);
+}
+
+const editPlanBtn = $("#edit-plan");
+if (editPlanBtn) editPlanBtn.addEventListener("click", () => withBusy(editPlanBtn, "Planning…", planEdit));
 
 // ── Helper status (Settings view) ────────────────────────────────
 async function checkHelper() {

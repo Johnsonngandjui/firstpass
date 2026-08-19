@@ -105,6 +105,21 @@ def plan_flow_route(req: PlanFlowRequest):
         raise HTTPException(500, str(e))
 
 
+class PlanEditRequest(BaseModel):
+    shots: list[dict]   # [{i, seconds, text}] — one per timeline clip, in order
+
+
+@app.post("/plan_edit")
+def plan_edit_route(req: PlanEditRequest):
+    try:
+        import ai_flow
+        return ai_flow.plan_edit(req.shots)
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
 def _whisper_available() -> bool:
     try:
         import crisperwhisper  # noqa
