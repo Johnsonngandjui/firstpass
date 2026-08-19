@@ -1334,12 +1334,39 @@ function renderFlowPlan(data) {
   if (ap) ap.addEventListener("click", () => withBusy(ap, "Reassembling…", applyReorder));
 }
 
+// Where each segment ENDS on the reassembled timeline. Mirrors the assemble
+// engine: kept spans (segment minus enabled cuts) laid end-to-end in topic
+// order. So b-roll markers land at the right spot on the REORDERED timeline.
+function assemblyEndById() {
+  const cuts = allCuts.filter(c => c.enabled).slice().sort((a, b) => a.startSec - b.startSec);
+  const keptLen = (s, e) => {
+    let len = 0, cur = s;
+    for (const c of cuts) {
+      if (c.endSec <= s || c.startSec >= e) continue;
+      if (c.startSec > cur) len += Math.min(c.startSec, e) - cur;
+      cur = Math.max(cur, c.endSec);
+    }
+    if (cur < e) len += e - cur;
+    return len;
+  };
+  const endById = {};
+  let pos = 0;
+  for (const id of (flowPlan && flowPlan.order) || []) {
+    const s = flowSegs.find(x => x.id === id);
+    if (!s) continue;
+    pos += keptLen(s.start, s.end);
+    endById[id] = pos;               // timeline seconds at this segment's end
+  }
+  return endById;
+}
+
 async function applyBrollMarkers() {
   const broll = (flowPlan && flowPlan.broll) || [];
   if (!broll.length) { toast("No b-roll suggestions to mark."); return; }
+  const endById = assemblyEndById();
   const marks = broll.map(b => {
-    const s = segById(b.after_segment);
-    return s ? { startSec: s.end, type: "broll", label: "B-roll: " + (b.idea || "") } : null;
+    const at = endById[b.after_segment];
+    return (at != null) ? { startSec: at, type: "broll", label: "B-roll: " + (b.idea || "") } : null;
   }).filter(Boolean);
   const n = await addTimelineMarkers(marks);
   toast(n ? `Added ${n} b-roll marker${n === 1 ? "" : "s"}.` : "Markers aren't supported on this build.");
