@@ -1151,6 +1151,20 @@ async function applyFormat() {
 
 // Add a Premiere timeline marker at each detected cut (feature-detected:
 // no-op with a note if this build has no marker API — never guesses blindly).
+// This build has no sequence.getMarkers(); markers come off the Markers CLASS
+// (like SequenceEditor.getEditor) or the sequence's project item. Try each.
+async function resolveMarkersObj(sequence) {
+  const M = ppro.Markers;
+  let seqPI = null; try { seqPI = await sequence.getProjectItem(); } catch (_) {}
+  const tries = [];
+  if (typeof sequence.getMarkers === "function") tries.push(() => sequence.getMarkers());
+  if (M && typeof M.getMarkers === "function") tries.push(() => M.getMarkers(sequence));
+  if (seqPI && typeof seqPI.getMarkers === "function") tries.push(() => seqPI.getMarkers());
+  if (M && seqPI && typeof M.getMarkers === "function") tries.push(() => M.getMarkers(seqPI));
+  for (const t of tries) { try { const m = await t(); if (m) return m; } catch (_) {} }
+  return null;
+}
+
 let lastMarkerError = "";   // surfaced by diagnostics when markers fail
 async function addTimelineMarkers(cuts) {
   lastMarkerError = "";
@@ -1158,11 +1172,10 @@ async function addTimelineMarkers(cuts) {
     const project  = await ppro.Project.getActiveProject();
     const sequence = project && await project.getActiveSequence();
     if (!sequence) { lastMarkerError = "no active sequence"; return 0; }
-    if (typeof sequence.getMarkers !== "function") { lastMarkerError = "sequence.getMarkers missing"; return 0; }
     if (!ppro.TickTime || typeof ppro.TickTime.createWithSeconds !== "function") { lastMarkerError = "TickTime.createWithSeconds missing"; return 0; }
 
-    const markers = await sequence.getMarkers();
-    if (!markers) { lastMarkerError = "getMarkers() returned null"; return 0; }
+    const markers = await resolveMarkersObj(sequence);
+    if (!markers) { lastMarkerError = "could not resolve a Markers object (tried sequence + Markers class + projectItem)"; return 0; }
     const mkTT = (s) => ppro.TickTime.createWithSeconds(s);
 
     // Every plausible create-a-marker shape this build might expose. We try each
@@ -1446,10 +1459,12 @@ async function buildEditReport() {
   const aTrack = sequence.getAudioTrack ? await sequence.getAudioTrack(0).catch(() => null) : null;
 
   // Probe the marker API (which shape does this build expose?)
+  const statics = (cls) => cls ? Object.getOwnPropertyNames(cls).filter(n => { try { return typeof cls[n] === "function"; } catch (_) { return false; } }).sort() : [];
   let markersObj = null;
-  try { markersObj = typeof sequence.getMarkers === "function" ? await sequence.getMarkers() : null; } catch (_) {}
+  try { markersObj = await resolveMarkersObj(sequence); } catch (_) {}
+  const markerClassStatics  = statics(ppro.Marker);
+  const markersClassStatics = statics(ppro.Markers);
   const markerClass = ppro.Marker ? listAllMethods(ppro.Marker) : [];
-  const markerClassStatics = ppro.Marker ? Object.getOwnPropertyNames(ppro.Marker).filter(n => { try { return typeof ppro.Marker[n] === "function"; } catch (_) { return false; } }).sort() : [];
 
   const report = {
     host: (() => { try { const h = require("uxp").host; return `${h?.name} ${h?.version}`; } catch (_) { return "?"; } })(),
@@ -1460,8 +1475,9 @@ async function buildEditReport() {
     audioTrack: aTrack ? listAllMethods(aTrack) : [],
     trackItem:  items[0] ? listAllMethods(items[0]) : [],
     trackItemCount: items.length,
-    markersObj: markersObj ? listAllMethods(markersObj) : ["(getMarkers() null / missing)"],
+    markersObj: markersObj ? listAllMethods(markersObj) : ["(could not resolve Markers object)"],
     markerClassStatics,
+    markersClassStatics,
     markerClassProto: markerClass,
     lastMarkerError: lastMarkerError || "(none — try Add b-roll markers first)"
   };
@@ -1492,7 +1508,8 @@ function renderDiagnostics(report) {
     `host: ${report.host}\nclips on V1: ${report.trackItemCount}\n\n` +
     `★ IN-PLACE EDIT CANDIDATES (${primitives.length}):\n${primitives.join("\n") || "(none found)"}\n\n` +
     `★ MARKER API — last error: ${report.lastMarkerError}\n` +
-    fmt("Markers object methods", report.markersObj) +
+    fmt("resolved Markers object methods", report.markersObj) +
+    fmt("ppro.Markers statics", report.markersClassStatics) +
     fmt("ppro.Marker statics", report.markerClassStatics) +
     fmt("ppro.Marker proto", report.markerClassProto) +
     `\n` +
