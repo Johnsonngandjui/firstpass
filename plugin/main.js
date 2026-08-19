@@ -1151,32 +1151,51 @@ async function applyFormat() {
 
 // Add a Premiere timeline marker at each detected cut (feature-detected:
 // no-op with a note if this build has no marker API — never guesses blindly).
+let lastMarkerError = "";   // surfaced by diagnostics when markers fail
 async function addTimelineMarkers(cuts) {
+  lastMarkerError = "";
   try {
     const project  = await ppro.Project.getActiveProject();
     const sequence = project && await project.getActiveSequence();
-    if (!sequence || typeof sequence.getMarkers !== "function") return 0;
-    if (!ppro.TickTime || typeof ppro.TickTime.createWithSeconds !== "function") return 0;
-    const markers = await sequence.getMarkers();
-    if (!markers) return 0;
-    const createName = ["createAddMarkerAction", "createMarkerAction"]
-      .find(n => typeof markers[n] === "function");
-    if (!createName) return 0;
+    if (!sequence) { lastMarkerError = "no active sequence"; return 0; }
+    if (typeof sequence.getMarkers !== "function") { lastMarkerError = "sequence.getMarkers missing"; return 0; }
+    if (!ppro.TickTime || typeof ppro.TickTime.createWithSeconds !== "function") { lastMarkerError = "TickTime.createWithSeconds missing"; return 0; }
 
-    let count = 0;
+    const markers = await sequence.getMarkers();
+    if (!markers) { lastMarkerError = "getMarkers() returned null"; return 0; }
+    const mkTT = (s) => ppro.TickTime.createWithSeconds(s);
+
+    // Every plausible create-a-marker shape this build might expose. We try each
+    // per cut inside the transaction and keep the first that yields an action.
+    const attempts = [
+      // (a) action-factory on the Markers object, various arg orders
+      (c) => markers.createAddMarkerAction && markers.createAddMarkerAction(c.label, mkTT(c.startSec), "Comment", "", mkTT(0)),
+      (c) => markers.createAddMarkerAction && markers.createAddMarkerAction(mkTT(c.startSec), c.label, "", 0),
+      (c) => markers.createAddMarkerAction && markers.createAddMarkerAction(c.label, mkTT(c.startSec)),
+      (c) => markers.createMarkerAction && markers.createMarkerAction(mkTT(c.startSec), c.label),
+      // (b) build a Marker via ppro.Marker, then add it
+      (c) => ppro.Marker && ppro.Marker.createMarker && markers.createAddMarkerAction &&
+             markers.createAddMarkerAction(ppro.Marker.createMarker(c.label, mkTT(c.startSec))),
+    ];
+
+    let count = 0, chosen = -1;
     await project.lockedAccess(() => {
       project.executeTransaction((compound) => {
         for (const c of cuts) {
-          try {
-            const a = markers[createName](ppro.TickTime.createWithSeconds(c.startSec),
-                                          c.label || c.type || "cut", "", 0);
-            if (a) { compound.addAction(a); count++; }
-          } catch (_) {}
+          for (let i = 0; i < attempts.length; i++) {
+            if (chosen !== -1 && chosen !== i) continue;   // stick with the shape that worked
+            try {
+              const a = attempts[i](c);
+              if (a) { compound.addAction(a); count++; chosen = i; break; }
+            } catch (e) { if (!lastMarkerError) lastMarkerError = `attempt ${i}: ${e && e.message ? e.message : e}`; }
+          }
         }
       }, "ClipCutter: add markers");
     });
+    if (!count && !lastMarkerError) lastMarkerError = "no create-marker shape produced an action";
     return count;
-  } catch (_) {
+  } catch (e) {
+    lastMarkerError = e && e.message ? e.message : String(e);
     return 0;
   }
 }
@@ -1426,6 +1445,12 @@ async function buildEditReport() {
   const items  = vTrack ? await vTrack.getTrackItems(CLIP, false) : [];
   const aTrack = sequence.getAudioTrack ? await sequence.getAudioTrack(0).catch(() => null) : null;
 
+  // Probe the marker API (which shape does this build expose?)
+  let markersObj = null;
+  try { markersObj = typeof sequence.getMarkers === "function" ? await sequence.getMarkers() : null; } catch (_) {}
+  const markerClass = ppro.Marker ? listAllMethods(ppro.Marker) : [];
+  const markerClassStatics = ppro.Marker ? Object.getOwnPropertyNames(ppro.Marker).filter(n => { try { return typeof ppro.Marker[n] === "function"; } catch (_) { return false; } }).sort() : [];
+
   const report = {
     host: (() => { try { const h = require("uxp").host; return `${h?.name} ${h?.version}`; } catch (_) { return "?"; } })(),
     pproClasses: Object.getOwnPropertyNames(ppro).sort(),
@@ -1434,7 +1459,11 @@ async function buildEditReport() {
     videoTrack: vTrack ? listAllMethods(vTrack) : [],
     audioTrack: aTrack ? listAllMethods(aTrack) : [],
     trackItem:  items[0] ? listAllMethods(items[0]) : [],
-    trackItemCount: items.length
+    trackItemCount: items.length,
+    markersObj: markersObj ? listAllMethods(markersObj) : ["(getMarkers() null / missing)"],
+    markerClassStatics,
+    markerClassProto: markerClass,
+    lastMarkerError: lastMarkerError || "(none — try Add b-roll markers first)"
   };
   lastEditReport = report;
   return report;
@@ -1457,9 +1486,16 @@ function renderDiagnostics(report) {
   if (!out) return;
   const primitives = findEditPrimitives(report);
   const fmt = (label, arr) => `── ${label} (${arr.length}) ──\n${arr.join(", ") || "(none)"}\n`;
+  const markerNames = [...(report.markersObj || []), ...(report.markerClassStatics || []), ...(report.markerClassProto || [])]
+    .filter(n => /marker/i.test(n) || /add|create/i.test(n));
   out.textContent =
     `host: ${report.host}\nclips on V1: ${report.trackItemCount}\n\n` +
     `★ IN-PLACE EDIT CANDIDATES (${primitives.length}):\n${primitives.join("\n") || "(none found)"}\n\n` +
+    `★ MARKER API — last error: ${report.lastMarkerError}\n` +
+    fmt("Markers object methods", report.markersObj) +
+    fmt("ppro.Marker statics", report.markerClassStatics) +
+    fmt("ppro.Marker proto", report.markerClassProto) +
+    `\n` +
     fmt("ppro classes", report.pproClasses) +
     fmt("sequence", report.sequence) +
     fmt("videoTrack", report.videoTrack) +
