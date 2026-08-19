@@ -1666,6 +1666,21 @@ async function applyMoveToShot(shot, m) {
 let editShots = null, editPlan = null;
 const MOVE_LABEL = { static: "Static", slow_push: "Slow push-in", punch_in: "Punch-in", hold_close: "Hold close", ease_out: "Ease out" };
 
+// Return a clip to a clean, un-keyframed Scale of 100 — but only if it still
+// carries keyframes (e.g. left over from a previous plan where it was moved).
+async function resetClipTo100(clip, srcIn, dur) {
+  const scale = await getScaleParam(clip);
+  if (!scale) return false;
+  let tv = false; try { tv = await scale.isTimeVarying(); } catch (_) {}
+  if (!tv) return false;                                  // already clean
+  await applyScaleKeyframes(clip, [[srcIn + 0.02, 100], [srcIn + Math.max(0.1, dur - 0.02), 100]]);  // flatten to 100
+  const project = await ppro.Project.getActiveProject();
+  await project.lockedAccess(() => {
+    project.executeTransaction((c) => { try { c.addAction(scale.createSetTimeVaryingAction(false)); } catch (_) {} }, "AI Edit: static reset");
+  });
+  return true;
+}
+
 async function planEdit() {
   const project = await ppro.Project.getActiveProject();
   const sequence = project && await project.getActiveSequence();
@@ -1741,6 +1756,12 @@ async function applyEditPlan() {
     done++;
     overlayProgress(6 + done / (withMotion.length || 1) * 94, `Shot ${done} of ${withMotion.length}`, `${done}/${withMotion.length}`);
     await sleep(120);
+  }
+  // Reset STATIC shots that still carry keyframes from an earlier plan → clean 100.
+  let cleaned = 0;
+  for (const m of moves.filter(x => x.move === "static")) {
+    const s = editShots.find(x => x.i === m.i); if (!s) continue;
+    for (const c of s._clips) { try { if (await resetClipTo100(c.it, c.srcIn, c.dur)) cleaned++; } catch (_) {} }
   }
   overlayHide();
 
