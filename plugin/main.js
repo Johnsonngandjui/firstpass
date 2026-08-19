@@ -1712,9 +1712,12 @@ async function applyEditPlan() {
     if (okOne) {
       applied++;
       if (!verify) {
-        const vals = okOne.values || [];
-        const animated = new Set(vals.map(v => Math.round(v))).size > 1 || m.move === "hold_close";
-        verify = { i: m.i, move: m.move, wanted: okOne.wanted, values: vals, animated };
+        // measure the WHOLE sentence's scale range across all its clips
+        const allVals = rs.flatMap(r => r.values || []).filter(v => typeof v === "number");
+        const lo = allVals.length ? Math.min(...allVals) : 100;
+        const hi = allVals.length ? Math.max(...allVals) : 100;
+        const changed = (hi - lo) > 0.5 || Math.abs(hi - 100) > 0.5;   // push (range) or hold (elevated)
+        verify = { i: m.i, move: m.move, from: m.from, to: m.to, lo: +lo.toFixed(1), hi: +hi.toFixed(1), changed };
       }
     } else { const bad = rs.find(r => !r.ok); if (bad && !failed) failed = bad.error; }
     done++;
@@ -1726,10 +1729,10 @@ async function applyEditPlan() {
   // Surface the value read-back so we KNOW the scale actually animates.
   const st = $("#edit-status"); st.classList.remove("hidden");
   if (applied && verify) {
-    st.className = verify.animated ? "ai-status" : "ai-status err";
-    st.textContent = (verify.animated ? "✅ " : "⚠️ ") +
-      `Applied ${applied} move${applied === 1 ? "" : "s"}. Shot ${verify.i + 1} (${verify.move}): wanted [${(verify.wanted || []).join(", ")}] → got [${(verify.values || []).join(", ")}].` +
-      (verify.animated ? " Scale animates ✓" : " Values didn't change — keyframe value not applied.");
+    st.className = verify.changed ? "ai-status" : "ai-status err";
+    st.textContent = (verify.changed ? "✅ " : "⚠️ ") +
+      `Applied ${applied} move${applied === 1 ? "" : "s"}. Shot ${verify.i + 1} (${verify.move}): plan ${verify.from}→${verify.to}%, applied scale ${verify.lo}–${verify.hi}% across the sentence.` +
+      (verify.changed ? "" : " Scale didn't change — keyframe value not applied.");
   } else {
     st.className = "ai-status err";
     st.textContent = "No moves applied" + (failed ? " — " + failed : ".");
