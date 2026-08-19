@@ -1,0 +1,178 @@
+"""
+ClipCutter — AI Flow (reorder / b-roll / pacing planner)
+
+Isolated from the cut engine on purpose: this module only READS a transcript and
+returns a structured edit *plan*. It never touches the timeline itself — the UXP
+panel reviews the plan and decides what to apply.
+
+The LLM call is behind a single swappable function `_chat()`. Today it targets a
+local Ollama model; swapping to Claude later means changing only `_chat()`.
+"""
+
+import json
+import urllib.request
+from typing import Optional
+
+# ── Model backend (swap here to change providers) ───────────────────────────
+OLLAMA_URL   = "http://localhost:11434"
+OLLAMA_MODEL = "qwen2.5:14b-instruct"
+
+
+def _chat(system: str, user: str, want_json: bool = True, timeout: int = 180) -> str:
+    """One chat turn against the local model. Returns the raw assistant text.
+    Raises RuntimeError with a clear message if the model/runtime isn't ready."""
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user",   "content": user},
+        ],
+        "stream": False,
+        "options": {"temperature": 0.4},
+    }
+    if want_json:
+        payload["format"] = "json"
+
+    req = urllib.request.Request(
+        f"{OLLAMA_URL}/api/chat",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.load(r)
+    except urllib.error.URLError as e:
+        raise RuntimeError(
+            f"Local model not reachable at {OLLAMA_URL} ({e}). "
+            f"Is Ollama running and '{OLLAMA_MODEL}' pulled?"
+        )
+    return (data.get("message") or {}).get("content", "")
+
+
+def model_ready() -> dict:
+    """Health probe for the AI-Flow backend: is Ollama up and the model present?"""
+    try:
+        with urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=4) as r:
+            tags = json.load(r)
+        names = [m.get("name", "") for m in tags.get("models", [])]
+        have = any(n == OLLAMA_MODEL or n.startswith(OLLAMA_MODEL.split(":")[0]) for n in names)
+        return {"runtime": True, "model": have, "model_name": OLLAMA_MODEL, "installed": names}
+    except Exception as e:
+        return {"runtime": False, "model": False, "model_name": OLLAMA_MODEL, "error": str(e)}
+
+
+# ── Transcript → reorderable segments ───────────────────────────────────────
+def segment_transcript(words: list[dict], min_pause: float = 0.6) -> list[dict]:
+    """Group words into sentence/beat segments (the unit we reorder). A segment
+    breaks at sentence-ending punctuation OR a real pause between words."""
+    segs, cur = [], []
+    for i, w in enumerate(words):
+        cur.append(w)
+        text = (w.get("word") or "").strip()
+        ends_sentence = text.endswith((".", "!", "?"))
+        next_gap = (words[i + 1]["start"] - w["end"]) if i + 1 < len(words) else 999
+        if ends_sentence or next_gap >= min_pause:
+            if cur:
+                segs.append(cur)
+                cur = []
+    if cur:
+        segs.append(cur)
+
+    out = []
+    for idx, group in enumerate(segs, start=1):
+        txt = " ".join((g.get("word") or "").strip() for g in group).strip()
+        if not txt:
+            continue
+        out.append({
+            "id":    idx,
+            "start": round(group[0]["start"], 2),
+            "end":   round(group[-1]["end"], 2),
+            "text":  txt,
+        })
+    return out
+
+
+# ── The plan ────────────────────────────────────────────────────────────────
+_SYSTEM = (
+    "You are a senior short-form video editor. You are given the ordered spoken "
+    "segments of a talking-head clip that has already had silence, filler words, "
+    "and repeated takes removed. Your job is to maximize viewer retention while "
+    "PRESERVING meaning and continuity. You reorder segments, mark where b-roll "
+    "would lift engagement, and suggest pacing beats. You never invent content."
+)
+
+_SCHEMA_INSTRUCTIONS = """Return ONLY valid JSON with exactly this shape:
+{
+  "order": [<segment ids, in the NEW order>],
+  "hook":  {"segment_id": <id>, "why": "<why this opens strongest>"},
+  "broll": [{"after_segment": <id>, "idea": "<what to show>", "why": "<why>"}],
+  "pacing":[{"after_segment": <id>, "action": "pause"|"tighten", "seconds": <number>, "why": "<why>"}],
+  "notes": "<one paragraph on the overall flow>",
+  "warnings": ["<continuity risks introduced by any reordering>"]
+}
+
+Rules:
+- "order" MUST contain every segment id exactly once, UNLESS a segment is truly
+  redundant — then omit it and explain in "warnings".
+- Reorder conservatively: only move a segment if it clearly improves the hook or
+  logical flow. If the original order is already good, return it unchanged.
+- Put the strongest, most curiosity-provoking line first as the hook.
+- Flag continuity risks (back-references like "as I said", tone/topic jumps that
+  a reorder would break) in "warnings".
+- b-roll and pacing "after_segment" refer to ids in the NEW order.
+"""
+
+
+def plan_flow(words: list[dict], goal: Optional[str] = None) -> dict:
+    """Build the edit plan from a transcript. Returns a dict with the plan plus
+    the segment table the UXP panel needs to map ids back to source timecodes."""
+    segments = segment_transcript(words)
+    if len(segments) < 2:
+        return {"segments": segments, "plan": None,
+                "message": "Not enough distinct segments to reorder."}
+
+    seg_lines = "\n".join(
+        f'[{s["id"]}] ({s["start"]:.1f}-{s["end"]:.1f}s) "{s["text"]}"' for s in segments
+    )
+    goal_line = f"\nCreator's goal: {goal}\n" if goal else ""
+    user = f"{_SCHEMA_INSTRUCTIONS}\n{goal_line}\nSegments:\n{seg_lines}"
+
+    raw = _chat(_SYSTEM, user, want_json=True)
+    try:
+        plan = json.loads(raw)
+    except json.JSONDecodeError:
+        # models sometimes wrap JSON in prose — grab the outermost object
+        s, e = raw.find("{"), raw.rfind("}")
+        if s == -1 or e == -1:
+            raise RuntimeError(f"Model did not return JSON. Got: {raw[:200]}")
+        plan = json.loads(raw[s:e + 1])
+
+    plan = _validate_plan(plan, segments)
+    return {"segments": segments, "plan": plan}
+
+
+def _validate_plan(plan: dict, segments: list[dict]) -> dict:
+    """Repair/sanity-check the model output so the panel can trust it."""
+    valid_ids = {s["id"] for s in segments}
+
+    order = [i for i in (plan.get("order") or []) if i in valid_ids]
+    seen, deduped = set(), []
+    for i in order:
+        if i not in seen:
+            seen.add(i); deduped.append(i)
+    # any segment the model dropped from order → append in original position so
+    # nothing silently vanishes; the panel shows these as "kept, not moved".
+    dropped = [s["id"] for s in segments if s["id"] not in seen]
+    plan["order"] = deduped + dropped
+    plan["dropped_by_model"] = [i for i in (plan.get("order") or []) if i not in deduped]
+
+    keep = lambda i: i in valid_ids
+    plan["broll"]  = [b for b in (plan.get("broll")  or []) if keep(b.get("after_segment"))]
+    plan["pacing"] = [p for p in (plan.get("pacing") or []) if keep(p.get("after_segment"))]
+    if not isinstance(plan.get("warnings"), list):
+        plan["warnings"] = []
+    plan.setdefault("notes", "")
+    plan.setdefault("hook", {})
+    plan["reordered"] = plan["order"] != [s["id"] for s in segments]
+    return plan

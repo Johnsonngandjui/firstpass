@@ -79,6 +79,32 @@ def health():
     return {"ok": True, "whisper": _whisper_available(), "ffmpeg": bool(FFMPEG)}
 
 
+# ── AI Flow (reorder / b-roll / pacing) — additive, isolated module ─────────
+class PlanFlowRequest(BaseModel):
+    words: list[dict]            # word-level transcript from the last analysis
+    goal:  Optional[str] = None  # optional creator intent, e.g. "punchy hook for Reels"
+
+
+@app.get("/ai_status")
+def ai_status():
+    try:
+        import ai_flow
+        return ai_flow.model_ready()
+    except Exception as e:
+        return {"runtime": False, "model": False, "error": str(e)}
+
+
+@app.post("/plan_flow")
+def plan_flow_route(req: PlanFlowRequest):
+    try:
+        import ai_flow
+        return ai_flow.plan_flow(req.words, goal=req.goal)
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
 def _whisper_available() -> bool:
     try:
         import crisperwhisper  # noqa
