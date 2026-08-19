@@ -1502,27 +1502,51 @@ async function emphasisZoom(clip, atSec, opts = {}) {
   }
 }
 
+// Probe which keyframe-value method this build honors: push Scale to 130 at
+// distinct times using each candidate approach, then read the value back.
+async function probeScaleValueSet(clip) {
+  const project = await ppro.Project.getActiveProject();
+  const mkTT = (s) => ppro.TickTime.createWithSeconds(s);
+  const scale = await getScaleParam(clip);
+  if (!scale) return ["no Scale param"];
+  let si = 0; try { const p = await clip.getInPoint(); si = p ? p.seconds : 0; } catch (_) {}
+  await project.lockedAccess(() => { project.executeTransaction((c) => { c.addAction(scale.createSetTimeVaryingAction(true)); }, "probe tv"); });
+
+  const T = 130;
+  const approaches = [
+    ["A createKeyframe(v)+position+add", (tt, c) => { const k = scale.createKeyframe(T); try { k.position = tt; } catch (_) {} try { k.time = tt; } catch (_) {} c.addAction(scale.createAddKeyframeAction(k)); }],
+    ["B createKeyframe(v)+.value+position+add", (tt, c) => { const k = scale.createKeyframe(T); try { k.value = T; } catch (_) {} try { k.position = tt; } catch (_) {} try { k.time = tt; } catch (_) {} c.addAction(scale.createAddKeyframeAction(k)); }],
+    ["C addKeyframeAction(tt) then setValueAction(v,tt)", (tt, c) => { const a = scale.createAddKeyframeAction(tt); if (a) c.addAction(a); const b = scale.createSetValueAction(T, tt); if (b) c.addAction(b); }],
+    ["D createSetValueAction(v,tt)", (tt, c) => { const a = scale.createSetValueAction(T, tt); if (a) c.addAction(a); }],
+    ["E createKeyframe(tt,v)+add", (tt, c) => { const k = scale.createKeyframe(tt, T); c.addAction(scale.createAddKeyframeAction(k)); }],
+    ["F createKeyframe(tt) set .value +add", (tt, c) => { const k = scale.createKeyframe(tt); try { k.value = T; } catch (_) {} c.addAction(scale.createAddKeyframeAction(k)); }],
+  ];
+  const out = [];
+  for (let i = 0; i < approaches.length; i++) {
+    const t = si + 0.3 + i * 0.5, tt = mkTT(t);
+    let err = "";
+    try { await project.lockedAccess(() => { project.executeTransaction((c) => { approaches[i][1](tt, c); }, "probe set " + i); }); }
+    catch (e) { err = e && e.message ? e.message : String(e); }
+    let got = "?";
+    try { const vo = await scale.getValueAtTime(tt); got = (vo && vo.value != null) ? vo.value : JSON.stringify(vo); } catch (e) { got = "read-err"; }
+    out.push(`${approaches[i][0]} @${t.toFixed(2)}s → value=${got}${err ? "  ERR:" + err : ""}`);
+  }
+  return out;
+}
+
 const editTestBtn = $("#edit-test-zoom");
-if (editTestBtn) editTestBtn.addEventListener("click", () => withBusy(editTestBtn, "Testing…", async () => {
+if (editTestBtn) editTestBtn.addEventListener("click", () => withBusy(editTestBtn, "Probing…", async () => {
   const st = $("#edit-status"); st.className = "ai-status"; st.classList.remove("hidden");
-  st.textContent = "Adding a test punch-in…";
+  st.textContent = "Probing keyframe value-set methods…";
   const project = await ppro.Project.getActiveProject();
   const sequence = project && await project.getActiveSequence();
   if (!sequence) { st.className = "ai-status err"; st.textContent = "No active sequence."; return; }
   const clip = await getSelectedVideoClip(sequence);
   if (!clip) { st.className = "ai-status err"; st.textContent = "Select a video clip on the timeline first."; return; }
-  let si = 0, cd = 0;
-  try { const p = await clip.getInPoint(); si = p ? p.seconds : 0; } catch (_) {}   // SOURCE-time base
-  try { const d = await clip.getDuration(); cd = d ? d.seconds : 0; } catch (_) {}
-  // slow push across the whole clip so it's obvious, in source time
-  const kf = [[si + 0.05, 100], [si + Math.max(0.2, cd - 0.05), 112]];
-  const r = await applyScaleKeyframes(clip, kf);
-  if (r.ok && !r.skipped) {
-    const lo = si - 0.1, hi = si + cd + 0.1;
-    const inRange = (r.placed || []).filter(t => t >= lo && t <= hi).length;
-    st.className = inRange >= 2 ? "ai-status" : "ai-status err";
-    st.textContent = (inRange >= 2 ? "✅ " : "⚠️ ") + `Push added. Clip source ${si.toFixed(2)}–${(si + cd).toFixed(2)}s, keyframes at [${(r.placed || []).join(", ")}] — ${inRange}/${(r.placed || []).length} inside the clip.`;
-  } else { st.className = "ai-status err"; st.textContent = "Keyframe failed → " + (r.error || "unknown"); }
+  const res = await probeScaleValueSet(clip);
+  st.className = "ai-status";
+  st.textContent = "Value-set probe (look for value=130):\n" + res.join("\n");
+  try { await fetch(`${HELPER}/debug_log`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scaleValueProbe: res }) }); } catch (_) {}
 }));
 
 // Generic scale-keyframe writer (used by AI Edit moves). kfList: [[timelineSec, scale%]].
