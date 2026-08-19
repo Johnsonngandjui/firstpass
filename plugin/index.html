@@ -1,0 +1,1004 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+/* ═══════════════════════════════════════════════════════════════
+   ClipCutter — native-Adobe dark UI
+   Inlined (not linked) because this UXP host was not reliably
+   fetching the external stylesheet on reload.
+   ═══════════════════════════════════════════════════════════════ */
+
+:root {
+  --bg:          #1e1e1e;
+  --surface:     #252525;
+  --surface-2:   #2b2b2b;
+  --surface-hi:  #323232;
+  --border:      #333333;
+  --border-2:    #3d3d3d;
+
+  --text:        #ececec;
+  --text-dim:    #9b9b9b;
+  --text-mute:   #6f6f6f;
+
+  --blue:        #2680eb;
+  --blue-hi:     #378ef0;
+  --blue-press:  #1a6ad4;
+  --blue-soft:   rgba(38,128,235,0.16);
+
+  --green:       #2fa572;
+  --green-soft:  rgba(47,165,114,0.20);
+  --red:         #e34850;
+  --red-soft:    rgba(227,72,80,0.20);
+  --amber:       #e6a817;
+  --amber-soft:  rgba(230,168,23,0.20);
+
+  --r-card:  12px;
+  --r-input: 8px;
+  --r-pill:  999px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* All interactive controls are <div role="button">, NOT <button>, because
+   UXP's engine draws native grey chrome on real <button>/<input type=button>
+   elements that `appearance: none` does not remove (Chrome does remove it,
+   which is why the browser preview looked right but Premiere did not).
+   Divs carry zero user-agent styling in any engine. */
+[role="button"] {
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  outline: none;
+  box-shadow: none;
+}
+[role="button"].is-busy,
+[role="button"][aria-disabled="true"] { opacity: 0.5; pointer-events: none; }
+
+input {
+  appearance: none;
+  -webkit-appearance: none;
+  font: inherit;
+  color: inherit;
+}
+
+html, body { height: 100%; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+.app { display: flex; height: 100vh; }
+
+/* ══ SIDEBAR ══════════════════════════════════════════════════ */
+.sidebar {
+  width: 80px;
+  flex: 0 0 80px;
+  background: #1a1a1a;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding: 10px 0 12px;
+}
+
+.nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+
+.nav-item {
+  position: relative;
+  background: none;
+  border: none;
+  color: #aeb1b9;                 /* bright enough that the (now filled) icons read clearly on the sidebar */
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 11px 4px;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+.nav-item .nav-ico { width: 22px; height: 22px; display: block; }
+.nav-item .nav-ico svg { width: 100%; height: 100%; display: block; }
+/* UXP doesn't resolve fill="currentColor" in SVG, so set the colour explicitly
+   (fill for solid icons, stroke for outline icons), matching the label. */
+.nav-item .nav-ico svg.filled  { fill: #aeb1b9; stroke: none; }
+.nav-item .nav-ico svg.stroked { fill: none; stroke: #aeb1b9; }
+.nav-item:hover .nav-ico svg.filled  { fill: #c6c8ce; }
+.nav-item:hover .nav-ico svg.stroked { stroke: #c6c8ce; }
+.nav-item.active .nav-ico svg.filled  { fill: var(--blue); }
+.nav-item.active .nav-ico svg.stroked { stroke: var(--blue); }
+.nav-item:hover { color: #c6c8ce; background: rgba(255,255,255,0.03); }
+.nav-item.active { color: var(--blue); }
+.nav-item.active::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 6px; bottom: 6px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--blue);
+}
+/* icon inherits the item's text color via currentColor — no glow, so the
+   icon is exactly the same color as its label (grey when idle, blue when active) */
+
+.sidebar-foot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  padding-top: 10px;
+}
+.version { font-size: 10px; color: var(--text-mute); }
+.badge-licensed {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9.5px;
+  font-weight: 600;
+  color: var(--green);
+  background: var(--green-soft);
+  border: 1px solid rgba(47,165,114,0.35);
+  border-radius: var(--r-pill);
+  padding: 3px 8px;
+}
+.badge-licensed .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+
+/* ══ CONTENT ══════════════════════════════════════════════════ */
+.content {
+  flex: 1;
+  min-width: 0;   /* flex items refuse to shrink below content width by default — this is what let the panel overflow instead of wrapping */
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 20px 18px 26px;
+}
+.content::-webkit-scrollbar { width: 8px; }
+.content::-webkit-scrollbar-track { background: transparent; }
+.content::-webkit-scrollbar-thumb { background: #3a3a3a; border-radius: 8px; border: 2px solid var(--bg); }
+
+.view { display: none; flex-direction: column; gap: 18px; }
+.view.active { display: flex; animation: fade 0.18s ease; }
+@keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+.view-head h1 { font-size: 19px; font-weight: 700; letter-spacing: -0.01em; }
+.view-head p { font-size: 12px; color: var(--text-dim); margin-top: 3px; }
+.view-head .cur-seq { color: var(--text-dim); }
+.view-head .cur-seq b { color: var(--text); font-weight: 600; }
+
+/* ══ CARD ═════════════════════════════════════════════════════ */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+.card.compact { padding: 6px 16px; }
+
+.field { display: flex; flex-direction: column; gap: 9px; min-width: 0; }
+.field.dimmed { opacity: 0.38; pointer-events: none; }
+.field.dimmed .readout::after { content: " (auto)"; font-weight: 500; color: var(--text-mute); }
+.field-lbl, .field label { font-size: 12px; color: var(--text-dim); font-weight: 500; }
+.field-top { display: flex; align-items: baseline; justify-content: space-between; }
+.field-top label { color: var(--text); font-weight: 500; }
+.readout {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* small (i) info bubble — hover/focus shows the native title tooltip */
+.info-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  border: 1px solid var(--text-mute);
+  color: var(--text-mute);
+  font-size: 9px;
+  font-style: italic;
+  font-weight: 600;
+  font-family: Georgia, serif;
+  cursor: help;
+  vertical-align: middle;
+  margin-left: 2px;
+}
+.info-ico:hover { color: var(--text-dim); border-color: var(--text-dim); }
+
+/* ══ SLIDER (custom div-based — UXP's native range input is unreliable) ══ */
+.slider {
+  position: relative;
+  width: 100%;
+  height: 18px;
+  cursor: pointer;
+  outline: none;
+  touch-action: none;
+}
+.slider::before {                 /* the empty track */
+  content: "";
+  position: absolute;
+  left: 0; right: 0; top: 50%;
+  height: 6px;
+  transform: translateY(-50%);
+  background: #3a3a3a;
+  border-radius: 3px;
+}
+.slider-fill {                    /* the filled (blue) portion */
+  position: absolute;
+  left: 0; top: 50%;
+  height: 6px;
+  width: 0;
+  transform: translateY(-50%);
+  background: var(--blue);
+  border-radius: 3px;
+  pointer-events: none;
+}
+.slider-thumb {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 18px; height: 18px;
+  transform: translate(-50%, -50%);
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.55);
+  pointer-events: none;
+  transition: box-shadow 0.1s;
+}
+.slider.dragging .slider-thumb { box-shadow: 0 0 0 6px var(--blue-soft), 0 1px 4px rgba(0,0,0,0.55); }
+.slider-ends { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--text-mute); margin-top: -2px; }
+
+/* ══ NUMBER INPUTS ════════════════════════════════════════════ */
+.num-row { display: flex; gap: 12px; }
+.num-field { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+.num-wrap { position: relative; display: flex; align-items: center; }
+.num-wrap input {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-input);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  padding: 9px 10px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.num-wrap input:focus { border-color: var(--blue); }
+
+/* ══ SEGMENTED CONTROL ════════════════════════════════════════ */
+.segmented {
+  display: flex;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 4px;
+  gap: 2px;
+}
+.seg {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  padding: 9px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: color 0.15s, background 0.15s;
+}
+.seg:hover { color: var(--text); }
+.seg.active { background: var(--surface-hi); color: var(--blue); font-weight: 700; }
+
+/* ══ GLOBAL SCOPE BAR (one source of truth for every cut pass) ═ */
+/* In normal flow (NOT sticky — UXP floats sticky elements over content). */
+.global-bar {
+  display: flex; align-items: center; gap: 12px;
+  margin: 0 0 4px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border-2);
+}
+.global-bar.hidden { display: none !important; }
+.gb-label {
+  flex: 0 0 auto;
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--text-mute);
+}
+.global-bar .segmented { flex: 0 0 auto; margin-left: auto; }
+.segmented.compact { padding: 3px; }
+.segmented.compact .seg { flex: 0 0 auto; padding: 6px 15px; font-size: 11.5px; }
+
+.hint-note {
+  font-size: 11.5px; color: var(--text-dim); line-height: 1.5;
+  background: var(--surface-2); border: 1px solid var(--border-2);
+  border-radius: 8px; padding: 12px 14px; margin: 12px 0 0;
+}
+.hint-note b { color: var(--text); font-weight: 600; }
+
+/* ══ TOGGLE SWITCH ════════════════════════════════════════════ */
+.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 3px 0;
+}
+.switch-row + .switch-row { border-top: 1px solid var(--border); padding-top: 12px; margin-top: -4px; }
+.sw-label { font-size: 13px; color: var(--text); flex: 1 1 auto; min-width: 0; padding-right: 8px; }
+.sw-label .hint { font-size: 11px; color: var(--text-mute); margin-left: 4px; }
+
+.switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 40px; height: 22px;
+  border-radius: 11px;          /* = height/2, explicit (UXP won't clamp 999px → was rendering as a pointed lens) */
+  background: #454545;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.18s;
+}
+.switch .knob {
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+  transition: transform 0.18s;
+}
+.switch.on { background: var(--blue); }
+.switch.on .knob { transform: translateX(18px); }
+
+/* ══ CHIPS ════════════════════════════════════════════════════ */
+/* UXP doesn't honor row-gap on wrapped flex lines, so space chips with margins. */
+.chips { display: flex; flex-wrap: wrap; }
+.chip { margin-right: 12px; margin-bottom: 12px; }
+.chip {
+  background: var(--surface-2);
+  border: 1px solid var(--border-2);
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* UXP ignores `height` on inline-flex, so size the pill with padding on ALL
+     sides (vertical padding = the top/bottom breathing room). */
+  padding-top: 9px; padding-bottom: 9px;
+  padding-left: 18px; padding-right: 18px;
+  border-radius: 10px;          /* rounded-rect so padding always clears the corner */
+  cursor: pointer;
+  transition: background 0.14s, border-color 0.14s, color 0.14s;
+}
+.chip:hover { border-color: #555; color: var(--text); }
+.chip.active {
+  background: var(--blue);
+  border-color: var(--blue);
+  color: #fff;
+  font-weight: 600;
+}
+
+/* ══ FORMAT CARDS ═════════════════════════════════════════════ */
+.fmt-list { display: flex; flex-direction: column; gap: 8px; }
+.fmt-group {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-mute);
+  padding: 6px 2px 0;
+}
+.fmt-group:not(:first-child) { margin-top: 6px; }
+.fmt {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 13px 14px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: border-color 0.15s, background 0.15s;
+}
+.fmt:hover { border-color: var(--border-2); background: var(--surface-2); }
+.fmt-radio {
+  flex: 0 0 auto;
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  border: 2px solid #555;
+  position: relative;
+  transition: border-color 0.15s;
+}
+.fmt-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.fmt-main { font-size: 14px; font-weight: 600; color: var(--text); }
+.fmt-sub { font-size: 11px; color: var(--text-dim); }
+.fmt-tag {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  padding-top: 6px; padding-bottom: 6px;
+  padding-left: 12px; padding-right: 12px;
+  border-radius: 8px;
+}
+.fmt-tag.land { color: #7fb0f5; background: rgba(38,128,235,0.14); }
+.fmt-tag.port { color: #c79bf0; background: rgba(160,110,235,0.16); }
+.fmt-tag.sq   { color: #7ad6a4; background: var(--green-soft); }
+.fmt.active { border-color: var(--blue); background: var(--blue-soft); }
+.fmt.active .fmt-radio { border-color: var(--blue); }
+.fmt.active .fmt-radio::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--blue);
+}
+/* the preset matching the open sequence */
+.fmt.is-current { border-color: var(--green); }
+.fmt.is-current .fmt-current {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--green);
+  margin-left: 8px;
+}
+.fmt-current { display: none; }
+
+/* ══ STAT ROWS (list-style readouts inside a card) ══════════════ */
+.stat-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 3px 0;
+}
+.stat-row + .stat-row { border-top: 1px solid var(--border); padding-top: 12px; margin-top: -4px; }
+.stat-val { font-size: 15px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+
+/* ══ ACTION BAR ═══════════════════════════════════════════════ */
+.action-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 8px 0;
+  padding-top: 2px;
+}
+.flex-spacer { flex: 1 1 auto; min-width: 8px; }
+/* UXP's flex gap doesn't reliably separate these, so guarantee a gap with margin. */
+.action-bar .btn + .btn { margin-left: 12px; }
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--blue);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 8px 2px;
+}
+.link-btn:hover { color: var(--blue-hi); text-decoration: underline; }
+
+.btn {
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+  line-height: 1.2;             /* room for the two-line labels (e.g. "Remove highlighted") */
+  min-width: 96px;              /* keep standalone buttons a consistent size */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 11px;          /* rounded-rect so padding always clears the corner */
+  /* UXP ignores `height` on inline-flex — size with padding on all sides. */
+  padding-top: 12px; padding-bottom: 12px;
+  padding-left: 24px; padding-right: 24px;
+  cursor: pointer;
+  border: none;
+  outline: none;
+  box-shadow: none;
+  background-clip: padding-box;
+  transition: background 0.14s, transform 0.05s;
+}
+.btn:active { transform: translateY(1px); }
+.btn.primary { background: var(--blue); color: #fff; }
+.btn.primary:hover { background: var(--blue-hi); }
+.btn.primary:active { background: var(--blue-press); }
+.btn.secondary { background: var(--surface-hi); color: var(--text); box-shadow: inset 0 0 0 1px var(--border-2); }
+.btn.secondary:hover { background: #3a3a3a; }
+
+.status-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; font-weight: 600; color: var(--text-dim);
+  background: var(--bg); border: 1px solid var(--border-2);
+  line-height: 1; border-radius: 9px;
+  padding-top: 7px; padding-bottom: 7px; padding-left: 14px; padding-right: 14px;
+}
+.status-pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-mute); }
+.status-pill.ok { color: var(--green); } .status-pill.ok .dot { background: var(--green); }
+.status-pill.bad { color: var(--red); } .status-pill.bad .dot { background: var(--red); }
+
+/* ══ REVIEW / TRANSCRIPT ══════════════════════════════════════ */
+.review-top { display: flex; align-items: center; justify-content: space-between; }
+.savings { font-size: 12px; color: var(--text-dim); }
+.savings b { color: var(--green); font-size: 15px; font-weight: 700; margin-left: 4px; }
+
+.transcript { line-height: 2.1; font-size: 13.5px; max-height: 44vh; overflow-y: auto; }
+.transcript::-webkit-scrollbar { width: 6px; }
+.transcript::-webkit-scrollbar-thumb { background: #3a3a3a; border-radius: 6px; }
+.transcript p { color: var(--text-dim); }
+.w {
+  padding: 1px 1px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: opacity 0.12s;
+}
+.w:hover { opacity: 0.75; }
+.w.rm         { color: #ff8b8f; text-decoration: line-through; }
+.w.keep       { color: #7ad6a4; }
+.w.kept-manual{ color: #7ad6a4; text-decoration: underline dotted; text-underline-offset: 3px; }
+/* "Highlight in transcript" off — keep removed words struck through but drop the colors */
+.transcript.no-highlight .w.rm { color: var(--text-dim); }
+.transcript.no-highlight .w.um,
+.transcript.no-highlight .w.keep,
+.transcript.no-highlight .w.kept-manual { color: var(--text-dim); text-decoration: none; }
+
+.cutlist { display: flex; flex-direction: column; gap: 8px; }
+.cut-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg);
+  border: 1px solid var(--border-2);
+  border-radius: 9px;
+  padding: 9px 12px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.cut-row:hover { border-color: #4a4a4a; }
+.cut-row.off { opacity: 0.4; }
+.cut-row .cr-time { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text); flex: 1; }
+.cut-row .cr-dur { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.cut-row .cr-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+.cut-row.off .cr-dot { background: transparent; border: 1.5px solid var(--text-mute); }
+.cut-row:not(.off) .cr-dot { background: var(--red); }
+
+.legend { display: flex; gap: 16px; font-size: 11.5px; color: var(--text-dim); padding: 0 2px; }
+.legend .lg { display: inline-flex; align-items: center; gap: 6px; }
+.legend .dot { width: 9px; height: 9px; border-radius: 50%; }
+.legend .dot.red { background: var(--red); }
+.legend .dot.green { background: var(--green); }
+.legend .dot.outline { background: none; border: 1.5px solid var(--green); }
+
+.review-bar-wrap { display: flex; flex-direction: column; align-items: center; gap: 18px; margin-top: 6px; }
+.review-bar-wrap .action-bar { width: 100%; align-items: stretch; }
+.review-bar-wrap .action-bar .btn { flex: 1; }   /* equal width; stretch = equal height */
+.badge-pill {
+  background: none;
+  border: 1px solid rgba(47,165,114,0.45);
+  color: var(--green);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  padding-top: 9px; padding-bottom: 9px; padding-left: 16px; padding-right: 16px;
+  border-radius: 9px;
+}
+
+/* ══ TOAST ════════════════════════════════════════════════════ */
+.toast {
+  position: fixed;
+  left: 50%; bottom: 18px;
+  transform: translateX(-50%);
+  max-width: 82%;
+  background: #303030;
+  border: 1px solid var(--border-2);
+  color: var(--text);
+  font-size: 12px;
+  padding: 10px 16px;
+  border-radius: 10px;
+  box-shadow: 0 8px 26px rgba(0,0,0,0.5);
+  z-index: 50;
+}
+.toast.err { border-color: var(--red); color: #ff9a9e; }
+/* ══ APPLY OVERLAY (AI "working" animation) ═══════════════════ */
+.overlay {
+  position: fixed; inset: 0;
+  background: rgba(16,16,19,0.78);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 100;
+  animation: ovIn 0.2s ease;
+}
+@keyframes ovIn { from { opacity: 0; } to { opacity: 1; } }
+.overlay-card {
+  width: 82%; max-width: 300px;
+  background: var(--surface);
+  border: 1px solid var(--border-2);
+  border-radius: 14px;
+  padding: 22px 20px 20px;
+  text-align: center;
+  box-shadow: 0 18px 50px rgba(0,0,0,0.55);
+}
+.wave {
+  display: flex; align-items: center; justify-content: center;
+  gap: 3px; height: 44px; margin-bottom: 16px;
+  position: relative; overflow: hidden;
+}
+.wbar {
+  width: 3px; border-radius: 2px;
+  background: #3d3d44;
+  transition: background 0.25s, transform 0.25s;
+}
+.wbar.cut { background: var(--blue); }
+.wbar.scan { transform: scaleY(1.25); background: var(--blue-hi); }
+.overlay-title { font-size: 15px; font-weight: 700; color: var(--text); }
+.overlay-sub { font-size: 12px; color: var(--text-dim); margin-top: 4px; min-height: 16px; }
+.oprogress {
+  height: 6px; background: #3a3a3a; border-radius: 3px;
+  margin-top: 14px; overflow: hidden;
+}
+.oprogress-fill {
+  height: 100%; width: 0%;
+  background: linear-gradient(90deg, var(--blue), var(--blue-hi));
+  border-radius: 3px; transition: width 0.3s ease;
+}
+.overlay-count { font-size: 11px; color: var(--text-mute); margin-top: 9px; font-variant-numeric: tabular-nums; }
+
+.hidden { display: none !important; }
+</style>
+</head>
+<body>
+  <div class="app">
+
+    <!-- ══ LEFT SIDEBAR ══════════════════════════════════════════ -->
+    <aside class="sidebar">
+      <nav class="nav" id="nav">
+        <div class="nav-item active" data-view="master" title="Master — clean up everything in one pass" role="button" tabindex="0">
+          <span class="nav-ico">
+            <svg viewBox="0 0 24 24" class="filled">
+              <rect x="2" y="5" width="20" height="2.6" rx="1.3"/>
+              <rect x="2" y="16.4" width="20" height="2.6" rx="1.3"/>
+              <circle cx="8" cy="6.3" r="3.4"/>
+              <circle cx="16" cy="17.7" r="3.4"/>
+            </svg>
+          </span>
+          <span class="nav-txt">Master</span>
+        </div>
+
+        <div class="nav-item" data-view="repeats" title="Remove Repeats" role="button" tabindex="0">
+          <span class="nav-ico">
+            <svg viewBox="0 0 24 24" class="stroked" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M17 1.5l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 22.5l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>
+            </svg>
+          </span>
+          <span class="nav-txt">Repeats</span>
+        </div>
+
+        <div class="nav-item" data-view="filler" title="Filler Word Remover" role="button" tabindex="0">
+          <span class="nav-ico">
+            <svg viewBox="0 0 24 24" class="filled">
+              <path d="M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-5 4v-4H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/>
+            </svg>
+          </span>
+          <span class="nav-txt">Filler</span>
+        </div>
+
+        <div class="nav-item" data-view="silence" title="Silence Remover" role="button" tabindex="0">
+          <span class="nav-ico">
+            <svg viewBox="0 0 24 24" class="filled">
+              <rect x="2.5" y="10" width="2.6" height="4" rx="1.3"/>
+              <rect x="7" y="6" width="2.6" height="12" rx="1.3"/>
+              <rect x="11.5" y="3" width="2.6" height="18" rx="1.3"/>
+              <rect x="16" y="7" width="2.6" height="10" rx="1.3"/>
+              <rect x="20.5" y="10.5" width="2.6" height="3" rx="1.3"/>
+            </svg>
+          </span>
+          <span class="nav-txt">Silence</span>
+        </div>
+
+        <div class="nav-item" data-view="format" title="Auto Sequence Formatter" role="button" tabindex="0">
+          <span class="nav-ico">
+            <svg viewBox="0 0 24 24" class="stroked" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M6 2v4M6 6H2M6 6v12a2 2 0 0 0 2 2h12M18 22v-4M18 18h4M18 18V6a2 2 0 0 0-2-2H4"/>
+            </svg>
+          </span>
+          <span class="nav-txt">Format</span>
+        </div>
+
+        <div class="nav-item" data-view="settings" title="Settings" role="button" tabindex="0">
+          <span class="nav-ico">
+            <svg viewBox="0 0 24 24" class="filled">
+              <path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7zm9.4 4.8l-1.9-1.1c.05-.4.05-.8 0-1.2l1.9-1.1a.6.6 0 0 0 .2-.8l-1.8-3.1a.6.6 0 0 0-.75-.25l-2.1.9c-.32-.25-.66-.46-1.03-.62l-.32-2.25A.6.6 0 0 0 14.2 2h-4.4a.6.6 0 0 0-.6.5L8.9 4.75c-.37.16-.7.37-1.03.62l-2.1-.9a.6.6 0 0 0-.75.25L3.2 7.8a.6.6 0 0 0 .2.8l1.9 1.1c-.05.4-.05.8 0 1.2L3.4 12a.6.6 0 0 0-.2.8l1.8 3.1a.6.6 0 0 0 .75.25l2.1-.9c.32.25.66.46 1.03.62l.32 2.25a.6.6 0 0 0 .6.5h4.4a.6.6 0 0 0 .6-.5l.32-2.25c.37-.16.7-.37 1.03-.62l2.1.9a.6.6 0 0 0 .75-.25l1.8-3.1a.6.6 0 0 0-.2-.8z"/>
+            </svg>
+          </span>
+          <span class="nav-txt">Settings</span>
+        </div>
+      </nav>
+
+      <div class="sidebar-foot">
+        <span class="version">v1.0.0</span>
+      </div>
+    </aside>
+
+    <!-- ══ MAIN CONTENT ══════════════════════════════════════════ -->
+    <main class="content" id="content">
+
+      <!-- ── GLOBAL SCOPE (governs every cut pass) ──────────── -->
+      <div class="global-bar" id="global-bar">
+        <span class="gb-label">Apply to</span>
+        <div class="segmented compact" data-group="scope">
+          <div class="seg active" data-val="selected" role="button" tabindex="0">Selected clips</div>
+          <div class="seg" data-val="entire" role="button" tabindex="0">Entire sequence</div>
+        </div>
+      </div>
+
+      <!-- ── A. SILENCE ─────────────────────────────────────── -->
+      <section class="view" data-view="silence">
+        <header class="view-head">
+          <h1>Silence Remover</h1>
+          <p>Detect and ripple-cut dead air.</p>
+        </header>
+
+        <div class="card">
+          <div class="field" id="thresh-field">
+            <div class="field-top"><label>Silence threshold <span class="info-ico" title="Audio below this level counts as silence.">i</span></label><span class="readout" id="sil-thresh-val">−32 dB</span></div>
+            <div class="slider" id="sil-thresh" data-min="-60" data-max="0" data-step="1" data-value="-32" role="slider" tabindex="0"><div class="slider-fill"></div><div class="slider-thumb"></div></div>
+          </div>
+
+          <div class="field">
+            <div class="field-top"><label>Min. silence duration <span class="info-ico" title="Gaps shorter than this are left alone.">i</span></label><span class="readout" id="sil-dur-val">0.50 s</span></div>
+            <div class="slider" id="sil-dur" data-min="0" data-max="2" data-step="0.05" data-value="0.5" role="slider" tabindex="0"><div class="slider-fill"></div><div class="slider-thumb"></div></div>
+          </div>
+
+          <div class="num-row">
+            <div class="num-field">
+              <label>Pad before <span class="info-ico" title="Extra time kept before each cut.">i</span></label>
+              <div class="num-wrap"><input type="number" id="pad-before" min="0" step="0.1" value="0.1"></div>
+            </div>
+            <div class="num-field">
+              <label>Pad after <span class="info-ico" title="Extra time kept after each cut.">i</span></label>
+              <div class="num-wrap"><input type="number" id="pad-after" min="0" step="0.1" value="0.1"></div>
+            </div>
+          </div>
+
+          <div class="switch-row">
+            <span class="sw-label">Smart dead-air <span class="info-ico" title="Cuts anywhere no one is talking — not just quiet spots. It listens to the words, so it still catches pauses over music or background noise, and never cuts a soft-spoken voice. Slower (it transcribes). Off = fast, plain volume threshold.">i</span></span>
+            <div class="switch on" role="button" aria-pressed="true" id="sw-smart-silence" tabindex="0"><span class="knob"></span></div>
+          </div>
+          <div class="switch-row">
+            <span class="sw-label">Ripple delete gaps <span class="info-ico" title="Automatically close the gap left by each cut.">i</span></span>
+            <div class="switch on" role="button" aria-pressed="true" id="sw-ripple" tabindex="0"><span class="knob"></span></div>
+          </div>
+          <div class="switch-row">
+            <span class="sw-label">Backup sequence first <span class="info-ico" title="Duplicate the sequence before editing it.">i</span></span>
+            <div class="switch" role="button" aria-pressed="false" id="sw-backup-sil" tabindex="0"><span class="knob"></span></div>
+          </div>
+        </div>
+
+        <div class="action-bar">
+          <div class="link-btn" data-analyze="silence" role="button" tabindex="0">Analyze</div>
+          <span class="flex-spacer"></span>
+          <div class="btn secondary" data-preview="silence" role="button" tabindex="0">Preview</div>
+          <div class="btn primary" data-apply="silence" role="button" tabindex="0">Apply</div>
+        </div>
+
+        <div class="card compact">
+          <div class="stat-row"><span class="sw-label">Silences detected</span><span class="stat-val" id="sil-count">—</span></div>
+          <div class="stat-row"><span class="sw-label">Removable time</span><span class="stat-val" id="sil-removable">—</span></div>
+          <div class="stat-row"><span class="sw-label">Detection</span><span class="stat-val" id="sil-detect" style="font-size:12px;font-weight:600;color:var(--text-dim);">—</span></div>
+        </div>
+      </section>
+
+      <!-- ── B. FILLER ──────────────────────────────────────── -->
+      <section class="view" data-view="filler">
+        <header class="view-head">
+          <h1>Filler Word Remover</h1>
+          <p>Transcribe, flag fillers, review, cut.</p>
+        </header>
+
+        <div class="card">
+          <label class="field-lbl">Words to remove</label>
+          <div class="chips" id="filler-chips">
+            <div class="chip active" data-word="um" role="button" tabindex="0">um</div>
+            <div class="chip active" data-word="uh" role="button" tabindex="0">uh</div>
+            <div class="chip" data-word="like" role="button" tabindex="0">like</div>
+            <div class="chip active" data-word="you know" role="button" tabindex="0">you know</div>
+            <div class="chip active" data-word="basically" role="button" tabindex="0">basically</div>
+            <div class="chip" data-word="actually" role="button" tabindex="0">actually</div>
+            <div class="chip active" data-word="literally" role="button" tabindex="0">literally</div>
+            <div class="chip" data-word="kind of" role="button" tabindex="0">kind of</div>
+            <div class="chip" data-word="sort of" role="button" tabindex="0">sort of</div>
+            <div class="chip" data-word="i mean" role="button" tabindex="0">I mean</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="switch-row"><span class="sw-label">Add timeline markers <span class="info-ico" title="Drop a marker at each filler word.">i</span></span><div class="switch on" role="button" aria-pressed="true" id="sw-markers" tabindex="0"><span class="knob"></span></div></div>
+          <div class="switch-row"><span class="sw-label">Highlight in transcript <span class="info-ico" title="Show flagged words in the review step.">i</span></span><div class="switch on" role="button" aria-pressed="true" id="sw-highlight" tabindex="0"><span class="knob"></span></div></div>
+          <div class="switch-row"><span class="sw-label">Auto-cut filler words <span class="info-ico" title="Skip review and cut immediately.">i</span></span><div class="switch" role="button" aria-pressed="false" id="sw-autocut-filler" tabindex="0"><span class="knob"></span></div></div>
+          <div class="switch-row"><span class="sw-label">Review before removal <span class="info-ico" title="Open the transcript to confirm before cutting.">i</span></span><div class="switch on" role="button" aria-pressed="true" id="sw-review-filler" tabindex="0"><span class="knob"></span></div></div>
+          <div class="switch-row"><span class="sw-label">Add audio crossfade <span class="info-ico" title="Smooth each cut with a short crossfade.">i</span></span><div class="switch" role="button" aria-pressed="false" id="sw-crossfade" tabindex="0"><span class="knob"></span></div></div>
+        </div>
+
+        <div class="action-bar">
+          <span class="flex-spacer"></span>
+          <div class="btn primary" data-analyze="filler" role="button" tabindex="0">Find fillers</div>
+        </div>
+      </section>
+
+      <!-- ── C. REPEATS ─────────────────────────────────────── -->
+      <section class="view" data-view="repeats">
+        <header class="view-head">
+          <h1>Remove Repeats</h1>
+          <p>Find re-spoken lines and cut the bad one.</p>
+        </header>
+
+        <div class="card">
+          <div class="field">
+            <div class="field-top"><label>Sensitivity <span class="info-ico" title="Higher catches more repeats, including looser matches.">i</span></label><span class="readout" id="sens-val">Balanced</span></div>
+            <div class="slider" id="sens" data-min="0" data-max="100" data-step="1" data-value="60" role="slider" tabindex="0"><div class="slider-fill"></div><div class="slider-thumb"></div></div>
+            <div class="slider-ends"><span>Low</span><span>High</span></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="switch-row"><span class="sw-label">Keep the last take <span class="info-ico" title="Assume the final repetition is the good one.">i</span></span><div class="switch on" role="button" aria-pressed="true" id="sw-keep-last" tabindex="0"><span class="knob"></span></div></div>
+          <div class="switch-row"><span class="sw-label">Review before removal <span class="info-ico" title="Open the transcript to confirm before cutting.">i</span></span><div class="switch on" role="button" aria-pressed="true" id="sw-review-repeats" tabindex="0"><span class="knob"></span></div></div>
+          <div class="switch-row"><span class="sw-label">Backup sequence first <span class="info-ico" title="Duplicate the sequence before editing it.">i</span></span><div class="switch" role="button" aria-pressed="false" id="sw-backup-rep" tabindex="0"><span class="knob"></span></div></div>
+        </div>
+
+        <div class="action-bar">
+          <span class="flex-spacer"></span>
+          <div class="btn primary" data-analyze="repeats" role="button" tabindex="0">Find repeats</div>
+        </div>
+      </section>
+
+      <!-- ── D. FORMAT ──────────────────────────────────────── -->
+      <section class="view" data-view="format">
+        <header class="view-head">
+          <h1>Auto Sequence Formatter</h1>
+          <p class="cur-seq">Current sequence <b id="cur-seq-info">—</b></p>
+        </header>
+
+        <div class="fmt-list" id="fmt-list">
+          <div class="fmt-group">Landscape</div>
+          <div class="fmt" data-w="1920" data-h="1080" data-orient="Landscape" role="button" tabindex="0"><span class="fmt-radio"></span><span class="fmt-body"><span class="fmt-main">1920 × 1080</span><span class="fmt-sub">FHD • 16:9</span></span><span class="fmt-tag land">Landscape</span></div>
+          <div class="fmt" data-w="3840" data-h="2160" data-orient="Landscape" role="button" tabindex="0"><span class="fmt-radio"></span><span class="fmt-body"><span class="fmt-main">3840 × 2160</span><span class="fmt-sub">4K • 16:9</span></span><span class="fmt-tag land">Landscape</span></div>
+          <div class="fmt" data-w="3840" data-h="2560" data-orient="Landscape" role="button" tabindex="0"><span class="fmt-radio"></span><span class="fmt-body"><span class="fmt-main">3840 × 2560</span><span class="fmt-sub">4K • 3:2</span></span><span class="fmt-tag land">Landscape</span></div>
+
+          <div class="fmt-group">Portrait</div>
+          <div class="fmt" data-w="1080" data-h="1920" data-orient="Portrait" role="button" tabindex="0"><span class="fmt-radio"></span><span class="fmt-body"><span class="fmt-main">1080 × 1920</span><span class="fmt-sub">FHD • 9:16 • Reels • TikTok</span></span><span class="fmt-tag port">Portrait</span></div>
+          <div class="fmt" data-w="2160" data-h="3840" data-orient="Portrait" role="button" tabindex="0"><span class="fmt-radio"></span><span class="fmt-body"><span class="fmt-main">2160 × 3840</span><span class="fmt-sub">4K • 9:16</span></span><span class="fmt-tag port">Portrait</span></div>
+          <div class="fmt" data-w="1440" data-h="2160" data-orient="Portrait" role="button" tabindex="0"><span class="fmt-radio"></span><span class="fmt-body"><span class="fmt-main">1440 × 2160</span><span class="fmt-sub">4K • 2:3</span></span><span class="fmt-tag port">Portrait</span></div>
+
+          <div class="fmt-group">Square</div>
+          <div class="fmt" data-w="2160" data-h="2160" data-orient="Square" role="button" tabindex="0"><span class="fmt-radio"></span><span class="fmt-body"><span class="fmt-main">2160 × 2160</span><span class="fmt-sub">4K • 1:1</span></span><span class="fmt-tag sq">Square</span></div>
+        </div>
+
+        <div class="card compact">
+          <div class="switch-row"><span class="sw-label">Resize a copy (keep original) <span class="info-ico" title="Off = resize the active sequence in place. On = apply to a duplicate instead.">i</span></span><div class="switch" role="button" aria-pressed="false" id="sw-resize-copy" tabindex="0"><span class="knob"></span></div></div>
+        </div>
+
+        <div class="action-bar">
+          <div class="link-btn" data-refresh role="button" tabindex="0">Refresh</div>
+          <span class="flex-spacer"></span>
+          <div class="btn primary" data-apply="format" role="button" tabindex="0">Apply size</div>
+        </div>
+      </section>
+
+      <!-- ── Master (overview) ──────────────────────────────── -->
+      <section class="view active" data-view="master">
+        <header class="view-head">
+          <h1>Master Cleanup</h1>
+          <p>Removes repeats, fillers, and silence in a single pass — the safe way to combine them.</p>
+        </header>
+        <div class="card">
+          <div class="switch-row"><span class="sw-label">Remove repeated takes</span><div class="switch on" role="button" aria-pressed="true" id="m-repeats" tabindex="0"><span class="knob"></span></div></div>
+          <div class="switch-row"><span class="sw-label">Remove filler words</span><div class="switch on" role="button" aria-pressed="true" id="m-filler" tabindex="0"><span class="knob"></span></div></div>
+          <div class="switch-row"><span class="sw-label">Remove silences</span><div class="switch on" role="button" aria-pressed="true" id="m-silence" tabindex="0"><span class="knob"></span></div></div>
+          <div class="switch-row"><span class="sw-label">Review before removal</span><div class="switch on" role="button" aria-pressed="true" id="m-review" tabindex="0"><span class="knob"></span></div></div>
+        </div>
+        <p class="hint-note">Doing passes one-by-one instead? Run them top-to-bottom in the sidebar: <b>Repeats → Filler → Silence</b>. Each pass edits the timeline, so later passes must come after.</p>
+        <div class="action-bar">
+          <span class="flex-spacer"></span>
+          <div class="btn primary" data-analyze="master" role="button" tabindex="0">Run full cleanup</div>
+        </div>
+      </section>
+
+      <!-- ── Settings ───────────────────────────────────────── -->
+      <section class="view" data-view="settings">
+        <header class="view-head">
+          <h1>Settings</h1>
+          <p>Helper connection and preferences.</p>
+        </header>
+        <div class="card">
+          <div class="switch-row">
+            <span class="sw-label">Helper status <span class="hint" id="helper-hint">checking…</span></span>
+            <span class="status-pill" id="helper-pill"><span class="dot"></span>—</span>
+          </div>
+          <div class="switch-row"><span class="sw-label">Use GPU when available</span><div class="switch on" role="button" aria-pressed="true" tabindex="0"><span class="knob"></span></div></div>
+          <div class="switch-row"><span class="sw-label">Confirm before applying</span><div class="switch on" role="button" aria-pressed="true" tabindex="0"><span class="knob"></span></div></div>
+        </div>
+
+        <div class="card">
+          <div class="stat-row">
+            <span class="sw-label">Editing API diagnostics</span>
+            <div class="btn secondary" role="button" tabindex="0" id="diag-run">Scan</div>
+          </div>
+          <p style="font-size:11px;color:var(--text-dim);margin:-4px 0 2px;">Live method list of the active sequence &amp; its tracks — used to confirm what in-place edits this Premiere build supports.</p>
+          <pre id="diag-out" style="font-family:ui-monospace,Menlo,monospace;font-size:10px;line-height:1.5;color:var(--text-dim);background:var(--bg);border:1px solid var(--border-2);border-radius:8px;padding:10px;max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0;">Open with a sequence active, then tap Scan.</pre>
+        </div>
+      </section>
+
+      <!-- ── E. TRANSCRIPT REVIEW (overlay view) ────────────── -->
+      <section class="view review" data-view="review">
+        <div class="review-top">
+          <div class="link-btn" id="review-back" role="button" tabindex="0">← Back</div>
+          <div class="savings">Est. time savings <b id="savings-val">0:00</b></div>
+        </div>
+
+        <div class="card transcript" id="transcript"></div>
+
+        <div class="card hidden" id="cutlist"></div>
+
+        <div class="legend">
+          <span class="lg"><span class="dot red"></span> removed</span>
+          <span class="lg"><span class="dot green"></span> kept take</span>
+          <span class="lg"><span class="dot outline"></span> you chose to keep</span>
+        </div>
+
+        <div class="review-bar-wrap">
+          <div class="action-bar">
+            <div class="btn secondary" id="keep-all" role="button" tabindex="0">Keep all</div>
+            <div class="btn primary" id="remove-hl" role="button" tabindex="0">Remove highlighted</div>
+          </div>
+          <span class="badge-pill" id="repeats-found">0 repeats found</span>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <div id="apply-overlay" class="overlay hidden">
+    <div class="overlay-card">
+      <div class="wave" id="overlay-wave"></div>
+      <div class="overlay-title" id="overlay-title">Cutting your sequence</div>
+      <div class="overlay-sub" id="overlay-sub">Preparing edits…</div>
+      <div class="oprogress"><div class="oprogress-fill" id="overlay-progress"></div></div>
+      <div class="overlay-count" id="overlay-count"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="main.js"></script>
+</body>
+</html>

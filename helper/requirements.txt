@@ -1,0 +1,11 @@
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+torch>=2.4.0
+torchaudio>=2.4.0
+transformers>=4.40.0    # <4.40 breaks CrisperWhisper's generate() (dup SuppressTokens processor)
+tokenizers>=0.20.0
+imageio-ffmpeg>=0.5.0   # bundles an ffmpeg binary if none is on PATH
+accelerate>=0.26.0      # required by transformers for low_cpu_mem_usage / device_map
+ctranslate2>=4.4,<5     # imported by crisperwhisper.hallucination even on the transformers backend
+# CrisperWhisper — install with the transformers backend extra:
+# pip install "crisperwhisper[transformers]"

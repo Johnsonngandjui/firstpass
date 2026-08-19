@@ -1,0 +1,23 @@
+# Python virtual environment (939M — recreate with pip install -r requirements)
+helper/clipcutter-env/
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Logs
+*.log
+
+# Packaged plugin artifacts
+*.ccx
+
+# macOS
+.DS_Store
+
+# Editor / session artifacts
+.artifacts/
+
+# accidental brace-expansion dir
+{plugin,helper}/
