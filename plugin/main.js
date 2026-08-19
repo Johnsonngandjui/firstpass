@@ -816,6 +816,162 @@ async function applyCuts(kind) {
   throw new Error("In-place cut unavailable — missing: " + result.missing.join(", "));
 }
 
+// ── Assemble engine: rebuild the active sequence in a NEW segment order ──────
+// Reordering can't be a ripple-delete — we re-assemble from the SOURCE media.
+// Strategy (avoids the "position past end → Invalid" wall):
+//   1. read the source ProjectItem + the timeline's current extent
+//   2. overwrite each ordered segment onto the timeline at a running position,
+//      all WITHIN the existing extent (overwrite replaces whatever was there)
+//   3. ripple-remove any leftover tail past the new assembly
+// orderedSegs: [{start,end}] in SOURCE-media seconds, already in the target order.
+async function assembleReorder(app, project, sequence, orderedSegs, onStep) {
+  const P = { v: "start" };
+  const step = onStep || (() => {});
+  try {
+    const SE  = app.SequenceEditor;
+    const TIS = app.TrackItemSelection;
+    const mkTT = (s) => app.TickTime.createWithSeconds(s);
+    const CLIP = app.Constants?.TrackItemType?.Clip ?? 1;
+    const MTenum = (app.Constants && app.Constants.MediaType) || {};
+    const MT = MTenum.ANY ?? Object.values(MTenum)[0];
+
+    P.v = "getEditor";
+    const editor = (SE && typeof SE.getEditor === "function") ? SE.getEditor(sequence) : null;
+    const missing = [];
+    if (!editor || typeof editor.createOverwriteItemAction !== "function") missing.push("editor.createOverwriteItemAction");
+    if (!editor || typeof editor.createRemoveItemsAction !== "function") missing.push("editor.createRemoveItemsAction");
+    if (!app.TickTime || typeof app.TickTime.createWithSeconds !== "function") missing.push("TickTime.createWithSeconds");
+    if (missing.length) return { ok: false, missing };
+
+    P.v = "track counts";
+    let vCount = 1, aCount = 0;
+    try { vCount = await sequence.getVideoTrackCount(); } catch (_) {}
+    try { aCount = await sequence.getAudioTrackCount(); } catch (_) {}
+
+    // Source clip of the analyzed media (RAW ProjectItem needed for overwrite) +
+    // its video-track index + the current timeline extent.
+    P.v = "find source";
+    let rawItem = null, srcClip = null, vIndex = 0, origEnd = 0;
+    for (let vt = 0; vt < vCount; vt++) {
+      const trk = await sequence.getVideoTrack(vt).catch(() => null);
+      if (!trk) continue;
+      for (const it of (await trk.getTrackItems(CLIP, false) || [])) {
+        let st = 0, du = 0;
+        try { const s = await it.getStartTime(); st = s ? s.seconds : 0; } catch (_) {}
+        try { const d = await it.getDuration();  du = d ? d.seconds : 0; } catch (_) {}
+        origEnd = Math.max(origEnd, st + du);
+        if (!rawItem) {
+          let ri = null, sc = null, mp = null;
+          try { ri = await it.getProjectItem(); } catch (_) {}
+          sc = ri ? app.ClipProjectItem.cast(ri) : null;
+          try { mp = sc ? await sc.getMediaFilePath() : null; } catch (_) {}
+          if (!mediaPath || !mp || mp === mediaPath) { rawItem = ri; srcClip = sc; vIndex = vt; }
+        }
+      }
+    }
+    if (!rawItem || !srcClip) return { ok: false, missing: ["source clip of the analyzed media"] };
+    if (typeof srcClip.createSetInOutPointsAction !== "function") return { ok: false, missing: ["ClipProjectItem.createSetInOutPointsAction"] };
+
+    // ── Lay each segment (new order) at a running position within the extent ──
+    P.v = "assemble";
+    const total = orderedSegs.length || 1;
+    let pos = 0, n = 0;
+    for (const seg of orderedSegs) {
+      const inS = seg.start, outS = seg.end, len = Math.max(0, outS - inS);
+      if (len <= 0.03) continue;
+      P.v = `setInOut(${inS.toFixed(2)},${outS.toFixed(2)})`;
+      await project.lockedAccess(() => {
+        project.executeTransaction((c) => {
+          c.addAction(srcClip.createSetInOutPointsAction(mkTT(inS), mkTT(outS)));
+        }, "ClipCutter: segment in/out");
+      });
+      P.v = `overwrite@${pos.toFixed(2)}(v=${vIndex})`;
+      await project.lockedAccess(() => {
+        project.executeTransaction((c) => {
+          c.addAction(editor.createOverwriteItemAction(rawItem, mkTT(pos), vIndex, 0));
+        }, "ClipCutter: place segment");
+      });
+      pos += len; n++;
+      step(6 + (n / total) * 80, `Placing segment ${n} of ${total}`, `${n} / ${total}`);
+      await sleep(140);
+    }
+    const assemblyLen = pos;
+
+    // ── Trim the leftover tail (old content beyond the new assembly) ──────────
+    if (origEnd > assemblyLen + 0.05) {
+      P.v = `trim-tail@${assemblyLen.toFixed(2)}`;
+      const findTail = async (track) => {
+        const out = [];
+        for (const it of (track ? await track.getTrackItems(CLIP, false) : []) || []) {
+          let st = -1; try { const x = await it.getStartTime(); st = x ? x.seconds : -1; } catch (_) {}
+          if (st >= assemblyLen - 0.02) out.push(it);
+        }
+        return out;
+      };
+      await project.lockedAccess(async () => {
+        const tail = [];
+        for (let vt = 0; vt < vCount; vt++) tail.push(...await findTail(await sequence.getVideoTrack(vt).catch(() => null)));
+        for (let at = 0; at < aCount; at++) tail.push(...await findTail(await sequence.getAudioTrack(at).catch(() => null)));
+        if (!tail.length) return;
+        let sel = null;
+        TIS.createEmptySelection((x) => { sel = x; });
+        if (!sel) return;
+        for (const it of tail) sel.addItem(it, true);
+        project.executeTransaction((c) => {
+          const a = editor.createRemoveItemsAction(sel, true, MT, false);
+          if (a) c.addAction(a);
+        }, "ClipCutter: trim tail");
+      });
+    }
+
+    step(100, "Done", "");
+    await sleep(180);
+    return { ok: true, placed: n, seconds: assemblyLen };
+  } catch (e) {
+    const msg = (e && e.message) ? e.message : String(e);
+    const err = new Error(`phase=${P.v} :: ${msg}`);
+    err._phase = P.v;
+    throw err;
+  }
+}
+
+// Apply the AI-Flow topic order to the timeline (re-assemble).
+async function applyReorder() {
+  if (!flowPlan || !flowSegs || !flowPlan.order || !flowPlan.order.length)
+    throw new Error("No arranged story to apply — run “Arrange story” first.");
+
+  const orderedSegs = flowPlan.order
+    .map(id => (flowSegs.find(s => s.id === id)))
+    .filter(Boolean)
+    .map(s => ({ start: s.start, end: s.end }));
+  if (!orderedSegs.length) throw new Error("Nothing to assemble.");
+
+  const app = ppro;
+  const project = await app.Project.getActiveProject();
+  if (!project) throw new Error("No active project open.");
+  const sequence = await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence — open your timeline.");
+
+  overlayShow("Reassembling your story");
+  overlayProgress(4, "Reading the new order…", "");
+
+  let result;
+  try {
+    result = await assembleReorder(app, project, sequence, orderedSegs,
+      (pct, sub, count) => overlayProgress(pct, sub, count));
+  } catch (err) {
+    overlayHide();
+    throw new Error((err && err.message) ? err.message : String(err));
+  }
+  overlayHide();
+
+  if (result.ok) {
+    toast(`Reassembled in the new order · ${result.placed} segments. (Cmd+Z to undo.)`);
+    return;
+  }
+  throw new Error("Reorder unavailable — missing: " + result.missing.join(", "));
+}
+
 // Find sequence-level range-edit methods actually present on this build, ranked
 // by how well they fit "excise a time window and ripple-collapse the timeline".
 // (The exact name varies by build, so we discover it instead of hardcoding one.)
@@ -1143,14 +1299,21 @@ function renderFlowPlan(data) {
   P.push(`<div class="action-bar" style="margin-top:14px;">
     <div class="btn secondary" id="flow-markers" role="button" tabindex="0">Add b-roll markers</div>
     <span class="flex-spacer"></span>
-    <div class="btn primary" id="flow-apply" role="button" tabindex="0" title="Reorder engine coming next" style="opacity:.45;pointer-events:none;">Apply reorder (soon)</div>
+    <div class="btn primary" id="flow-apply" role="button" tabindex="0">Apply reorder</div>
   </div>`);
+  if (plan.reordered) {
+    P.push(`<p class="hint-note" style="margin-top:2px;">“Apply reorder” rebuilds the timeline in this order from your source media. Review the warnings above first — <b>Cmd+Z undoes it</b>.</p>`);
+  } else {
+    P.push(`<p class="hint-note" style="margin-top:2px;">The model kept the original order, so “Apply reorder” would change nothing.</p>`);
+  }
 
   box.innerHTML = P.join("");
   box.classList.remove("hidden");
 
   const mk = $("#flow-markers");
   if (mk) mk.addEventListener("click", () => withBusy(mk, "Marking…", applyBrollMarkers));
+  const ap = $("#flow-apply");
+  if (ap) ap.addEventListener("click", () => withBusy(ap, "Reassembling…", applyReorder));
 }
 
 async function applyBrollMarkers() {
