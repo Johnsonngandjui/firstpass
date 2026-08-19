@@ -1502,10 +1502,24 @@ async function probeMotion(items) {
               try {
                 const prm = await comp[pGet](p);
                 if (!prm) continue;
-                let sv = "?"; try { sv = JSON.stringify(await prm.getStartValue()); } catch (e) { sv = "err:" + (e && e.message ? e.message : e); }
                 let kf = "?"; try { kf = await prm.areKeyframesSupported(); } catch (_) {}
-                let dn = ""; try { dn = typeof prm.getDisplayName === "function" ? await prm.getDisplayName() : ""; } catch (_) {}
-                info.params.push({ index: p, displayName: dn, startValue: sv, keyframable: kf });
+                const vinfo = {};
+                try {
+                  const v = await prm.getStartValue();
+                  vinfo.jsType = typeof v;
+                  if (v && typeof v === "object") {
+                    vinfo.ownProps = Object.getOwnPropertyNames(v);
+                    vinfo.methods = listAllMethods(v);
+                    // try common value accessors
+                    try { vinfo.dotValue = JSON.stringify(v.value); } catch (_) {}
+                    for (const g of ["getValue", "get", "value"]) {
+                      try { if (typeof v[g] === "function") { vinfo["call_" + g] = JSON.stringify(await v[g]()); } } catch (_) {}
+                    }
+                  } else {
+                    vinfo.scalar = v;
+                  }
+                } catch (e) { vinfo.err = e && e.message ? e.message : String(e); }
+                info.params.push({ index: p, keyframable: kf, value: vinfo });
               } catch (_) {}
             }
           }
