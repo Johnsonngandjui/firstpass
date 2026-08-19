@@ -334,6 +334,50 @@ body {
 }
 .hint-note b { color: var(--text); font-weight: 600; }
 
+/* ══ AI FLOW ══════════════════════════════════════════════════ */
+.ai-status {
+  font-size: 12px; color: var(--text-dim); line-height: 1.5;
+  padding: 11px 13px; border: 1px solid var(--border-2);
+  border-radius: 8px; background: var(--surface-2);
+}
+.ai-status.err { border-color: var(--red); color: #ff9a9e; }
+#flow-result { display: flex; flex-direction: column; gap: 8px; }
+.flow-sec-title {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--text-mute); margin: 16px 0 4px;
+}
+.flow-seg {
+  display: flex; gap: 10px; align-items: flex-start;
+  background: var(--surface-2); border: 1px solid var(--border-2);
+  border-radius: 8px; padding: 9px 11px;
+}
+.flow-seg .idx {
+  flex: 0 0 auto; width: 22px; height: 22px; border-radius: 6px;
+  background: var(--surface-hi); color: var(--text-dim);
+  font-size: 11px; font-weight: 700;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-variant-numeric: tabular-nums;
+}
+.flow-seg.moved { border-color: rgba(38,128,235,0.5); }
+.flow-seg.moved .idx { color: var(--blue); background: rgba(38,128,235,0.14); }
+.flow-seg .txt { font-size: 12.5px; line-height: 1.45; color: var(--text); min-width: 0; }
+.flow-seg .movedtag { flex: 0 0 auto; font-size: 10px; font-weight: 700; color: var(--blue); margin-left: auto; }
+.flow-item {
+  font-size: 12px; color: var(--text-dim); line-height: 1.45;
+  padding: 9px 11px; background: var(--surface-2);
+  border: 1px solid var(--border-2); border-radius: 8px;
+}
+.flow-item b { color: var(--text); font-weight: 600; }
+.flow-item.warn { border-color: rgba(232,168,56,0.45); color: #e8c07a; }
+.flow-item.hook { border-color: rgba(38,128,235,0.45); }
+.flow-topic {
+  display: flex; flex-direction: column; gap: 2px;
+  margin: 16px 0 6px; padding-left: 10px;
+  border-left: 3px solid var(--blue);
+}
+.flow-topic-title { font-size: 13px; font-weight: 700; color: var(--text); }
+.flow-topic-why { font-size: 11px; color: var(--text-mute); line-height: 1.4; }
+
 /* ══ TOGGLE SWITCH ════════════════════════════════════════════ */
 .switch-row {
   display: flex;
@@ -693,6 +737,16 @@ body {
           <span class="nav-txt">Master</span>
         </div>
 
+        <div class="nav-item" data-view="flow" title="AI Flow — reorder, b-roll & pacing" role="button" tabindex="0">
+          <span class="nav-ico">
+            <svg viewBox="0 0 24 24" class="filled">
+              <path d="M12 2l1.7 5.1L19 8.8l-5.3 1.7L12 16l-1.7-5.5L5 8.8l5.3-1.7z"/>
+              <path d="M18.5 13.5l.85 2.55 2.65.9-2.65.9-.85 2.55-.85-2.55-2.65-.9 2.65-.9z"/>
+            </svg>
+          </span>
+          <span class="nav-txt">AI Flow</span>
+        </div>
+
         <div class="nav-item" data-view="repeats" title="Remove Repeats" role="button" tabindex="0">
           <span class="nav-ico">
             <svg viewBox="0 0 24 24" class="stroked" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
@@ -931,6 +985,24 @@ body {
           <span class="flex-spacer"></span>
           <div class="btn primary" data-analyze="master" role="button" tabindex="0">Run full cleanup</div>
         </div>
+      </section>
+
+      <!-- ── AI Flow ────────────────────────────────────────── -->
+      <section class="view" data-view="flow">
+        <header class="view-head">
+          <h1>AI Flow</h1>
+          <p>Groups your clips by topic and arranges them into a story that's easy to follow — reviewed before anything moves.</p>
+        </header>
+
+        <p class="hint-note">Uses the transcript from your last <b>Master</b> (or analysis). Runs a local model on your Mac — no cloud, no cost. A long clip may take a minute.</p>
+
+        <div class="action-bar">
+          <span class="flex-spacer"></span>
+          <div class="btn primary" id="flow-plan" role="button" tabindex="0">Arrange story</div>
+        </div>
+
+        <div id="flow-status" class="ai-status hidden"></div>
+        <div id="flow-result" class="hidden"></div>
       </section>
 
       <!-- ── Settings ───────────────────────────────────────── -->

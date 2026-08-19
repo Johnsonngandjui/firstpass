@@ -10,6 +10,11 @@ HEALTH="http://localhost:7742/health"
 # Match the server by its script path — the venv python is a symlink, so the
 # process shows the RESOLVED interpreter path, not clipcutter-env/… .
 SERVER_TAG="/Users/johnsonngandjui/Workspace/clipcutter/helper/server.py"
+# Local LLM backend for AI Flow (idle-light: it unloads the model after a few
+# minutes of no use, so we just make sure the daemon is up).
+OLLAMA="/opt/homebrew/opt/ollama/bin/ollama"
+ollama_up()    { curl -s --max-time 2 http://localhost:11434/api/version >/dev/null 2>&1; }
+start_ollama() { ollama_up && return 0; [ -x "$OLLAMA" ] || return 0; nohup "$OLLAMA" serve >>"$LOG" 2>&1 & }
 
 premiere_running() {
   pgrep -x "Adobe Premiere Pro 2026" >/dev/null 2>&1 && return 0
@@ -37,9 +42,10 @@ trap 'stop_server; exit 0' TERM INT
 
 while true; do
   if premiere_running; then
-    server_up || start_server
+    ollama_up || start_ollama       # AI Flow backend
+    server_up || start_server       # transcription / cut helper
   else
-    stop_server
+    stop_server                     # leave Ollama alone (it self-unloads its model)
   fi
   sleep 5
 done

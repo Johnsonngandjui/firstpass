@@ -86,7 +86,7 @@ function showView(name) {
   $$(".view").forEach(v => v.classList.toggle("active", v.dataset.view === name));
   $$(".nav-item").forEach(n => n.classList.toggle("active", n.dataset.view === name));
   // Scope (Selected/Entire) only governs the cut passes — hide it where it's moot.
-  const noScope = name === "format" || name === "settings" || name === "review";
+  const noScope = name === "format" || name === "settings" || name === "review" || name === "flow";
   const gb = $("#global-bar");
   if (gb) gb.classList.toggle("hidden", noScope);
   $("#content").scrollTop = 0;
@@ -816,6 +816,180 @@ async function applyCuts(kind) {
   throw new Error("In-place cut unavailable — missing: " + result.missing.join(", "));
 }
 
+// ── Assemble engine: rebuild the active sequence in a NEW segment order ──────
+// Reordering can't be a ripple-delete — we re-assemble from the SOURCE media.
+// Strategy (avoids the "position past end → Invalid" wall):
+//   1. read the source ProjectItem + the timeline's current extent
+//   2. overwrite each ordered segment onto the timeline at a running position,
+//      all WITHIN the existing extent (overwrite replaces whatever was there)
+//   3. ripple-remove any leftover tail past the new assembly
+// orderedSegs: [{start,end}] in SOURCE-media seconds, already in the target order.
+async function assembleReorder(app, project, sequence, orderedSegs, onStep) {
+  const P = { v: "start" };
+  const step = onStep || (() => {});
+  try {
+    const SE  = app.SequenceEditor;
+    const TIS = app.TrackItemSelection;
+    const mkTT = (s) => app.TickTime.createWithSeconds(s);
+    const CLIP = app.Constants?.TrackItemType?.Clip ?? 1;
+    const MTenum = (app.Constants && app.Constants.MediaType) || {};
+    const MT = MTenum.ANY ?? Object.values(MTenum)[0];
+
+    P.v = "getEditor";
+    const editor = (SE && typeof SE.getEditor === "function") ? SE.getEditor(sequence) : null;
+    const missing = [];
+    if (!editor || typeof editor.createOverwriteItemAction !== "function") missing.push("editor.createOverwriteItemAction");
+    if (!editor || typeof editor.createRemoveItemsAction !== "function") missing.push("editor.createRemoveItemsAction");
+    if (!app.TickTime || typeof app.TickTime.createWithSeconds !== "function") missing.push("TickTime.createWithSeconds");
+    if (missing.length) return { ok: false, missing };
+
+    P.v = "track counts";
+    let vCount = 1, aCount = 0;
+    try { vCount = await sequence.getVideoTrackCount(); } catch (_) {}
+    try { aCount = await sequence.getAudioTrackCount(); } catch (_) {}
+
+    // Source clip of the analyzed media (RAW ProjectItem needed for overwrite) +
+    // its video-track index + the current timeline extent.
+    P.v = "find source";
+    let rawItem = null, srcClip = null, vIndex = 0, origEnd = 0;
+    for (let vt = 0; vt < vCount; vt++) {
+      const trk = await sequence.getVideoTrack(vt).catch(() => null);
+      if (!trk) continue;
+      for (const it of (await trk.getTrackItems(CLIP, false) || [])) {
+        let st = 0, du = 0;
+        try { const s = await it.getStartTime(); st = s ? s.seconds : 0; } catch (_) {}
+        try { const d = await it.getDuration();  du = d ? d.seconds : 0; } catch (_) {}
+        origEnd = Math.max(origEnd, st + du);
+        if (!rawItem) {
+          let ri = null, sc = null, mp = null;
+          try { ri = await it.getProjectItem(); } catch (_) {}
+          sc = ri ? app.ClipProjectItem.cast(ri) : null;
+          try { mp = sc ? await sc.getMediaFilePath() : null; } catch (_) {}
+          if (!mediaPath || !mp || mp === mediaPath) { rawItem = ri; srcClip = sc; vIndex = vt; }
+        }
+      }
+    }
+    if (!rawItem || !srcClip) return { ok: false, missing: ["source clip of the analyzed media"] };
+    if (typeof srcClip.createSetInOutPointsAction !== "function") return { ok: false, missing: ["ClipProjectItem.createSetInOutPointsAction"] };
+
+    // ── Lay each segment (new order) at a running position within the extent ──
+    P.v = "assemble";
+    const total = orderedSegs.length || 1;
+    let pos = 0, n = 0;
+    for (const seg of orderedSegs) {
+      const inS = seg.start, outS = seg.end, len = Math.max(0, outS - inS);
+      if (len <= 0.03) continue;
+      P.v = `setInOut(${inS.toFixed(2)},${outS.toFixed(2)})`;
+      await project.lockedAccess(() => {
+        project.executeTransaction((c) => {
+          c.addAction(srcClip.createSetInOutPointsAction(mkTT(inS), mkTT(outS)));
+        }, "ClipCutter: segment in/out");
+      });
+      P.v = `overwrite@${pos.toFixed(2)}(v=${vIndex})`;
+      await project.lockedAccess(() => {
+        project.executeTransaction((c) => {
+          c.addAction(editor.createOverwriteItemAction(rawItem, mkTT(pos), vIndex, 0));
+        }, "ClipCutter: place segment");
+      });
+      pos += len; n++;
+      step(6 + (n / total) * 80, `Placing segment ${n} of ${total}`, `${n} / ${total}`);
+      await sleep(140);
+    }
+    const assemblyLen = pos;
+
+    // ── Trim the leftover tail (old content beyond the new assembly) ──────────
+    if (origEnd > assemblyLen + 0.05) {
+      P.v = `trim-tail@${assemblyLen.toFixed(2)}`;
+      const findTail = async (track) => {
+        const out = [];
+        for (const it of (track ? await track.getTrackItems(CLIP, false) : []) || []) {
+          let st = -1; try { const x = await it.getStartTime(); st = x ? x.seconds : -1; } catch (_) {}
+          if (st >= assemblyLen - 0.02) out.push(it);
+        }
+        return out;
+      };
+      await project.lockedAccess(async () => {
+        const tail = [];
+        for (let vt = 0; vt < vCount; vt++) tail.push(...await findTail(await sequence.getVideoTrack(vt).catch(() => null)));
+        for (let at = 0; at < aCount; at++) tail.push(...await findTail(await sequence.getAudioTrack(at).catch(() => null)));
+        if (!tail.length) return;
+        let sel = null;
+        TIS.createEmptySelection((x) => { sel = x; });
+        if (!sel) return;
+        for (const it of tail) sel.addItem(it, true);
+        project.executeTransaction((c) => {
+          const a = editor.createRemoveItemsAction(sel, true, MT, false);
+          if (a) c.addAction(a);
+        }, "ClipCutter: trim tail");
+      });
+    }
+
+    step(100, "Done", "");
+    await sleep(180);
+    return { ok: true, placed: n, seconds: assemblyLen };
+  } catch (e) {
+    const msg = (e && e.message) ? e.message : String(e);
+    const err = new Error(`phase=${P.v} :: ${msg}`);
+    err._phase = P.v;
+    throw err;
+  }
+}
+
+// Apply the AI-Flow topic order to the timeline (re-assemble).
+async function applyReorder() {
+  if (!flowPlan || !flowSegs || !flowPlan.order || !flowPlan.order.length)
+    throw new Error("No arranged story to apply — run “Arrange story” first.");
+
+  // A segment's [start,end] SPANS the gaps Master removed (silences, fillers,
+  // earlier repeat takes). Placing the whole span from source would re-introduce
+  // that removed content and undo Master's cuts. So expand each segment into only
+  // its KEPT spans — the ranges left after subtracting the enabled cuts.
+  const cuts = allCuts.filter(c => c.enabled).slice().sort((a, b) => a.startSec - b.startSec);
+  const keptWithin = (s, e) => {
+    const spans = []; let cur = s;
+    for (const c of cuts) {
+      if (c.endSec <= s || c.startSec >= e) continue;      // no overlap with this segment
+      if (c.startSec > cur) spans.push({ start: cur, end: Math.min(c.startSec, e) });
+      cur = Math.max(cur, c.endSec);
+    }
+    if (cur < e) spans.push({ start: cur, end: e });
+    return spans.filter(sp => sp.end - sp.start > 0.03);
+  };
+
+  const orderedSegs = [];
+  for (const id of flowPlan.order) {
+    const s = flowSegs.find(x => x.id === id);
+    if (!s) continue;
+    for (const sp of keptWithin(s.start, s.end)) orderedSegs.push(sp);
+  }
+  if (!orderedSegs.length) throw new Error("Nothing to assemble.");
+
+  const app = ppro;
+  const project = await app.Project.getActiveProject();
+  if (!project) throw new Error("No active project open.");
+  const sequence = await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence — open your timeline.");
+
+  overlayShow("Reassembling your story");
+  overlayProgress(4, "Reading the new order…", "");
+
+  let result;
+  try {
+    result = await assembleReorder(app, project, sequence, orderedSegs,
+      (pct, sub, count) => overlayProgress(pct, sub, count));
+  } catch (err) {
+    overlayHide();
+    throw new Error((err && err.message) ? err.message : String(err));
+  }
+  overlayHide();
+
+  if (result.ok) {
+    toast(`Reassembled in the new order · ${result.placed} segments. (Cmd+Z to undo.)`);
+    return;
+  }
+  throw new Error("Reorder unavailable — missing: " + result.missing.join(", "));
+}
+
 // Find sequence-level range-edit methods actually present on this build, ranked
 // by how well they fit "excise a time window and ripple-collapse the timeline".
 // (The exact name varies by build, so we discover it instead of hardcoding one.)
@@ -977,32 +1151,66 @@ async function applyFormat() {
 
 // Add a Premiere timeline marker at each detected cut (feature-detected:
 // no-op with a note if this build has no marker API — never guesses blindly).
+// This build has no sequence.getMarkers(); markers come off the Markers CLASS
+// (like SequenceEditor.getEditor) or the sequence's project item. Try each.
+async function resolveMarkersObj(sequence) {
+  const M = ppro.Markers;
+  let seqPI = null; try { seqPI = await sequence.getProjectItem(); } catch (_) {}
+  const tries = [];
+  if (typeof sequence.getMarkers === "function") tries.push(() => sequence.getMarkers());
+  if (M && typeof M.getMarkers === "function") tries.push(() => M.getMarkers(sequence));
+  if (seqPI && typeof seqPI.getMarkers === "function") tries.push(() => seqPI.getMarkers());
+  if (M && seqPI && typeof M.getMarkers === "function") tries.push(() => M.getMarkers(seqPI));
+  for (const t of tries) { try { const m = await t(); if (m) return m; } catch (_) {} }
+  return null;
+}
+
+let lastMarkerError = "";   // surfaced by diagnostics when markers fail
 async function addTimelineMarkers(cuts) {
+  lastMarkerError = "";
   try {
     const project  = await ppro.Project.getActiveProject();
     const sequence = project && await project.getActiveSequence();
-    if (!sequence || typeof sequence.getMarkers !== "function") return 0;
-    if (!ppro.TickTime || typeof ppro.TickTime.createWithSeconds !== "function") return 0;
-    const markers = await sequence.getMarkers();
-    if (!markers) return 0;
-    const createName = ["createAddMarkerAction", "createMarkerAction"]
-      .find(n => typeof markers[n] === "function");
-    if (!createName) return 0;
+    if (!sequence) { lastMarkerError = "no active sequence"; return 0; }
+    if (!ppro.TickTime || typeof ppro.TickTime.createWithSeconds !== "function") { lastMarkerError = "TickTime.createWithSeconds missing"; return 0; }
 
-    let count = 0;
+    const markers = await resolveMarkersObj(sequence);
+    if (!markers) { lastMarkerError = "could not resolve a Markers object (tried sequence + Markers class + projectItem)"; return 0; }
+    const mkTT = (s) => ppro.TickTime.createWithSeconds(s);
+    // Marker type — prefer the build's enum, fall back to the string "Comment".
+    const MT = (ppro.Constants && ppro.Constants.MarkerType) || {};
+    const cType = MT.COMMENT ?? MT.Comment ?? MT.Chapter ?? Object.values(MT)[0] ?? "Comment";
+
+    // createAddMarkerAction(name, type, startTime, duration, comment) — plus a few
+    // fallbacks in case type/duration ordering differs. Errors are collected so a
+    // rescan shows exactly which signature is off.
+    const errs = [];
+    const attempts = [
+      (c) => markers.createAddMarkerAction(c.label || "cut", cType, mkTT(c.startSec), mkTT(0), c.label || ""),
+      (c) => markers.createAddMarkerAction(c.label || "cut", "Comment", mkTT(c.startSec), mkTT(0), ""),
+      (c) => markers.createAddMarkerAction(c.label || "cut", cType, mkTT(c.startSec), 0, ""),
+      (c) => markers.createAddMarkerAction(c.label || "cut", mkTT(c.startSec), mkTT(0), cType, ""),
+      (c) => markers.createAddMarkerAction(mkTT(c.startSec), c.label || "cut", cType, mkTT(0), ""),
+    ];
+
+    let count = 0, chosen = -1;
     await project.lockedAccess(() => {
       project.executeTransaction((compound) => {
         for (const c of cuts) {
-          try {
-            const a = markers[createName](ppro.TickTime.createWithSeconds(c.startSec),
-                                          c.label || c.type || "cut", "", 0);
-            if (a) { compound.addAction(a); count++; }
-          } catch (_) {}
+          for (let i = 0; i < attempts.length; i++) {
+            if (chosen !== -1 && chosen !== i) continue;   // stick with the shape that worked
+            try {
+              const a = attempts[i](c);
+              if (a) { compound.addAction(a); count++; chosen = i; break; }
+            } catch (e) { if (chosen === -1) errs[i] = (e && e.message ? e.message : String(e)); }
+          }
         }
       }, "ClipCutter: add markers");
     });
+    if (!count) lastMarkerError = "all signatures failed → " + errs.map((m, i) => `[${i}] ${m}`).filter(Boolean).join(" | ");
     return count;
-  } catch (_) {
+  } catch (e) {
+    lastMarkerError = e && e.message ? e.message : String(e);
     return 0;
   }
 }
@@ -1012,7 +1220,9 @@ $$("[data-analyze]").forEach(b => b.addEventListener("click", () => {
   const kind = b.dataset.analyze;
   withBusy(b, "Working…", async () => {
     await runAnalyze(kind);
-    if (isOn("sw-markers") && allCuts.length) {
+    // "Add timeline markers" is a FILLER-tab option — only mark on the filler
+    // pass, never on Master/Silence/Repeats (those shouldn't drop markers).
+    if (kind === "filler" && isOn("sw-markers") && allCuts.length) {
       const m = await addTimelineMarkers(allCuts);
       if (m) toast(`Added ${m} timeline marker${m === 1 ? "" : "s"}.`);
     }
@@ -1054,6 +1264,152 @@ $$("[data-refresh]").forEach(b => b.addEventListener("click", () =>
     toast("Sequence info refreshed.");
   })
 ));
+
+// ── AI Flow (reorder / b-roll / pacing) ──────────────────────────
+let flowPlan = null, flowSegs = null;
+
+// The post-cleanup transcript = words NOT inside any enabled cut.
+function keptWords() {
+  const cuts = allCuts.filter(c => c.enabled);
+  return allWords.filter(w => !cuts.some(c => w.start >= c.startSec && w.start < c.endSec));
+}
+const segById = (id) => (flowSegs || []).find(s => s.id === id);
+
+async function planFlow() {
+  const words = keptWords();
+  if (!words.length) throw new Error("No transcript yet — run Master (or an analysis) first.");
+  const status = $("#flow-status");
+  status.className = "ai-status";
+  status.classList.remove("hidden");
+  status.textContent = "Grouping by topic and arranging the story… a long clip can take a minute.";
+  $("#flow-result").classList.add("hidden");
+
+  let resp;
+  try {
+    resp = await fetch(`${HELPER}/plan_flow`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ words })
+    });
+  } catch (e) { throw new Error("Helper not reachable — is the server running?"); }
+  if (!resp.ok) {
+    const e = await resp.json().catch(() => ({}));
+    status.className = "ai-status err";
+    status.textContent = e.detail || "AI Flow failed — check the local model in Settings.";
+    return;
+  }
+  const data = await resp.json();
+  if (!data.plan) { status.textContent = data.message || "Not enough distinct segments to reorder."; return; }
+  flowPlan = data.plan; flowSegs = data.segments;
+  status.classList.add("hidden");
+  renderFlowPlan(data);
+}
+
+function renderFlowPlan(data) {
+  const plan = data.plan, segs = data.segments;
+  const box = $("#flow-result");
+  const origOrder = segs.map(s => s.id);
+  const P = [];
+
+  if (plan.hook && plan.hook.segment_id) {
+    const h = segById(plan.hook.segment_id);
+    P.push(`<div class="flow-sec-title">Hook</div>`);
+    P.push(`<div class="flow-item hook"><b>Opens on:</b> “${escapeHtml(h ? h.text : "")}”<br>${escapeHtml(plan.hook.why || "")}</div>`);
+  }
+
+  // Story = topics in order, each with its segments. A segment is "moved" if its
+  // new position differs from the original recording order.
+  P.push(`<div class="flow-sec-title">Story ${plan.reordered ? "· regrouped" : "· unchanged"}</div>`);
+  let pos = 0;
+  for (const t of (plan.topics || [])) {
+    P.push(`<div class="flow-topic"><span class="flow-topic-title">${escapeHtml(t.title || "Topic")}</span>` +
+           (t.why ? `<span class="flow-topic-why">${escapeHtml(t.why)}</span>` : "") + `</div>`);
+    for (const id of (t.segment_ids || [])) {
+      const s = segById(id); if (!s) continue;
+      const moved = origOrder[pos] !== id;
+      P.push(
+        `<div class="flow-seg${moved ? " moved" : ""}">` +
+        `<span class="idx">${pos + 1}</span>` +
+        `<span class="txt">${escapeHtml(s.text)}</span>` +
+        (moved ? `<span class="movedtag">was #${id}</span>` : "") +
+        `</div>`);
+      pos++;
+    }
+  }
+
+  if (plan.broll && plan.broll.length) {
+    P.push(`<div class="flow-sec-title">B-roll (${plan.broll.length})</div>`);
+    for (const b of plan.broll) P.push(`<div class="flow-item">🎬 <b>${escapeHtml(b.idea || "")}</b><br>${escapeHtml(b.why || "")}</div>`);
+  }
+  if (plan.pacing && plan.pacing.length) {
+    P.push(`<div class="flow-sec-title">Pacing</div>`);
+    for (const p of plan.pacing) P.push(`<div class="flow-item"><b>${p.action === "pause" ? "Add pause" : "Tighten"} ${p.seconds || 0}s</b> — ${escapeHtml(p.why || "")}</div>`);
+  }
+  if (plan.warnings && plan.warnings.length) {
+    P.push(`<div class="flow-sec-title">Continuity warnings</div>`);
+    for (const w of plan.warnings) P.push(`<div class="flow-item warn">⚠ ${escapeHtml(w)}</div>`);
+  }
+  if (plan.notes) P.push(`<div class="flow-item">${escapeHtml(plan.notes)}</div>`);
+
+  P.push(`<div class="action-bar" style="margin-top:14px;">
+    <div class="btn secondary" id="flow-markers" role="button" tabindex="0">Add b-roll markers</div>
+    <span class="flex-spacer"></span>
+    <div class="btn primary" id="flow-apply" role="button" tabindex="0">Apply reorder</div>
+  </div>`);
+  if (plan.reordered) {
+    P.push(`<p class="hint-note" style="margin-top:2px;">“Apply reorder” rebuilds the timeline in this order from your source media. Review the warnings above first — <b>Cmd+Z undoes it</b>.</p>`);
+  } else {
+    P.push(`<p class="hint-note" style="margin-top:2px;">The model kept the original order, so “Apply reorder” would change nothing.</p>`);
+  }
+
+  box.innerHTML = P.join("");
+  box.classList.remove("hidden");
+
+  const mk = $("#flow-markers");
+  if (mk) mk.addEventListener("click", () => withBusy(mk, "Marking…", applyBrollMarkers));
+  const ap = $("#flow-apply");
+  if (ap) ap.addEventListener("click", () => withBusy(ap, "Reassembling…", applyReorder));
+}
+
+// Where each segment ENDS on the reassembled timeline. Mirrors the assemble
+// engine: kept spans (segment minus enabled cuts) laid end-to-end in topic
+// order. So b-roll markers land at the right spot on the REORDERED timeline.
+function assemblyEndById() {
+  const cuts = allCuts.filter(c => c.enabled).slice().sort((a, b) => a.startSec - b.startSec);
+  const keptLen = (s, e) => {
+    let len = 0, cur = s;
+    for (const c of cuts) {
+      if (c.endSec <= s || c.startSec >= e) continue;
+      if (c.startSec > cur) len += Math.min(c.startSec, e) - cur;
+      cur = Math.max(cur, c.endSec);
+    }
+    if (cur < e) len += e - cur;
+    return len;
+  };
+  const endById = {};
+  let pos = 0;
+  for (const id of (flowPlan && flowPlan.order) || []) {
+    const s = flowSegs.find(x => x.id === id);
+    if (!s) continue;
+    pos += keptLen(s.start, s.end);
+    endById[id] = pos;               // timeline seconds at this segment's end
+  }
+  return endById;
+}
+
+async function applyBrollMarkers() {
+  const broll = (flowPlan && flowPlan.broll) || [];
+  if (!broll.length) { toast("No b-roll suggestions to mark."); return; }
+  const endById = assemblyEndById();
+  const marks = broll.map(b => {
+    const at = endById[b.after_segment];
+    return (at != null) ? { startSec: at, type: "broll", label: "B-roll: " + (b.idea || "") } : null;
+  }).filter(Boolean);
+  const n = await addTimelineMarkers(marks);
+  toast(n ? `Added ${n} b-roll marker${n === 1 ? "" : "s"}.` : "Markers aren't supported on this build.");
+}
+
+const flowBtn = $("#flow-plan");
+if (flowBtn) flowBtn.addEventListener("click", () => withBusy(flowBtn, "Planning…", planFlow));
 
 // ── Helper status (Settings view) ────────────────────────────────
 async function checkHelper() {
@@ -1106,6 +1462,14 @@ async function buildEditReport() {
   const items  = vTrack ? await vTrack.getTrackItems(CLIP, false) : [];
   const aTrack = sequence.getAudioTrack ? await sequence.getAudioTrack(0).catch(() => null) : null;
 
+  // Probe the marker API (which shape does this build expose?)
+  const statics = (cls) => cls ? Object.getOwnPropertyNames(cls).filter(n => { try { return typeof cls[n] === "function"; } catch (_) { return false; } }).sort() : [];
+  let markersObj = null;
+  try { markersObj = await resolveMarkersObj(sequence); } catch (_) {}
+  const markerClassStatics  = statics(ppro.Marker);
+  const markersClassStatics = statics(ppro.Markers);
+  const markerClass = ppro.Marker ? listAllMethods(ppro.Marker) : [];
+
   const report = {
     host: (() => { try { const h = require("uxp").host; return `${h?.name} ${h?.version}`; } catch (_) { return "?"; } })(),
     pproClasses: Object.getOwnPropertyNames(ppro).sort(),
@@ -1114,7 +1478,13 @@ async function buildEditReport() {
     videoTrack: vTrack ? listAllMethods(vTrack) : [],
     audioTrack: aTrack ? listAllMethods(aTrack) : [],
     trackItem:  items[0] ? listAllMethods(items[0]) : [],
-    trackItemCount: items.length
+    trackItemCount: items.length,
+    markersObj: markersObj ? listAllMethods(markersObj) : ["(could not resolve Markers object)"],
+    markerClassStatics,
+    markersClassStatics,
+    markerClassProto: markerClass,
+    markerTypeEnum: (() => { try { return ppro.Constants && ppro.Constants.MarkerType ? JSON.parse(JSON.stringify(ppro.Constants.MarkerType)) : "(no Constants.MarkerType)"; } catch (_) { return "(unreadable)"; } })(),
+    lastMarkerError: lastMarkerError || "(none — try Add b-roll markers first)"
   };
   lastEditReport = report;
   return report;
@@ -1137,9 +1507,18 @@ function renderDiagnostics(report) {
   if (!out) return;
   const primitives = findEditPrimitives(report);
   const fmt = (label, arr) => `── ${label} (${arr.length}) ──\n${arr.join(", ") || "(none)"}\n`;
+  const markerNames = [...(report.markersObj || []), ...(report.markerClassStatics || []), ...(report.markerClassProto || [])]
+    .filter(n => /marker/i.test(n) || /add|create/i.test(n));
   out.textContent =
     `host: ${report.host}\nclips on V1: ${report.trackItemCount}\n\n` +
     `★ IN-PLACE EDIT CANDIDATES (${primitives.length}):\n${primitives.join("\n") || "(none found)"}\n\n` +
+    `★ MARKER API — last error: ${report.lastMarkerError}\n` +
+    `MarkerType enum: ${JSON.stringify(report.markerTypeEnum)}\n` +
+    fmt("resolved Markers object methods", report.markersObj) +
+    fmt("ppro.Markers statics", report.markersClassStatics) +
+    fmt("ppro.Marker statics", report.markerClassStatics) +
+    fmt("ppro.Marker proto", report.markerClassProto) +
+    `\n` +
     fmt("ppro classes", report.pproClasses) +
     fmt("sequence", report.sequence) +
     fmt("videoTrack", report.videoTrack) +
@@ -1151,6 +1530,14 @@ function renderDiagnostics(report) {
 async function runDiagnostics() {
   const report = await buildEditReport();
   renderDiagnostics(report);
+  // UXP blocks copy-paste from the panel, so also write the report to disk via
+  // the helper (helper/clipcutter_debug.json) for out-of-band inspection.
+  try {
+    await fetch(`${HELPER}/debug_log`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(report)
+    });
+  } catch (_) {}
   return report;
 }
 
