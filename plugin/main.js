@@ -86,7 +86,7 @@ function showView(name) {
   $$(".view").forEach(v => v.classList.toggle("active", v.dataset.view === name));
   $$(".nav-item").forEach(n => n.classList.toggle("active", n.dataset.view === name));
   // Scope (Selected/Entire) only governs the cut passes — hide it where it's moot.
-  const noScope = name === "format" || name === "settings" || name === "review" || name === "flow";
+  const noScope = name === "format" || name === "settings" || name === "review" || name === "flow" || name === "edit";
   const gb = $("#global-bar");
   if (gb) gb.classList.toggle("hidden", noScope);
   $("#content").scrollTop = 0;
@@ -1410,6 +1410,115 @@ async function applyBrollMarkers() {
 
 const flowBtn = $("#flow-plan");
 if (flowBtn) flowBtn.addEventListener("click", () => withBusy(flowBtn, "Planning…", planFlow));
+
+// ── AI Edit: keyframe engine (emphasis scale zoom) ───────────────
+// ADBE Motion, Scale = param index 1 (probed). We keyframe it. The exact
+// add-keyframe call shape is the last unknown, so we try several shapes and
+// record which worked / the errors, with phase tracking.
+const MOTION_SCALE_INDEX = 1;
+
+async function getSelectedVideoClip(sequence) {
+  const CLIP = ppro.Constants?.TrackItemType?.Clip ?? 1;
+  let vCount = 1; try { vCount = await sequence.getVideoTrackCount(); } catch (_) {}
+  for (let vt = 0; vt < vCount; vt++) {
+    const trk = await sequence.getVideoTrack(vt).catch(() => null);
+    if (!trk) continue;
+    for (const it of (await trk.getTrackItems(CLIP, false) || [])) {
+      let sel = false; try { sel = await it.getIsSelected(); } catch (_) {}
+      if (sel) return it;
+    }
+  }
+  return null;
+}
+
+async function getScaleParam(clip) {
+  const chain = await clip.getComponentChain();
+  const n = await chain.getComponentCount();
+  for (let i = 0; i < n; i++) {
+    const c = await chain.getComponentAtIndex(i);
+    const mn = typeof c.getMatchName === "function" ? await c.getMatchName() : "";
+    if (/ADBE Motion/i.test(mn)) return await c.getParam(MOTION_SCALE_INDEX);
+  }
+  return null;
+}
+
+// Add one Scale keyframe (value at TickTime) trying several API shapes.
+// Returns the shape index that worked, or -1; pushes errors into `errs`.
+function addScaleKeyframeAction(compound, param, tt, value, errs) {
+  const shapes = [
+    // A: createKeyframe(value) → set time on it → createAddKeyframeAction(kf)
+    () => { const kf = param.createKeyframe(value); if (!kf) return null;
+            try { kf.position = tt; } catch (_) {} try { kf.time = tt; } catch (_) {}
+            return param.createAddKeyframeAction(kf); },
+    // B: createAddKeyframeAction(time, value)
+    () => param.createAddKeyframeAction(tt, value),
+    // C: createKeyframe(time, value) → add
+    () => { const kf = param.createKeyframe(tt, value); return kf ? param.createAddKeyframeAction(kf) : null; },
+    // D: setValue at time (auto-keyframes when time-varying)
+    () => param.createSetValueAction(value, tt),
+    // E: createSetValueAction(keyframeObj)
+    () => { const kf = param.createKeyframe(value); if (!kf) return null; try { kf.position = tt; } catch (_) {} return param.createSetValueAction(kf); },
+  ];
+  for (let i = 0; i < shapes.length; i++) {
+    try { const a = shapes[i](); if (a) { compound.addAction(a); return i; } }
+    catch (e) { errs[i] = (e && e.message ? e.message : String(e)); }
+  }
+  return -1;
+}
+
+let lastZoomError = "";
+async function emphasisZoom(clip, atSec, opts = {}) {
+  const peak = opts.peak ?? 110, ramp = opts.ramp ?? 0.25, hold = opts.hold ?? 0.4;
+  const app = ppro, P = { v: "start" };
+  lastZoomError = "";
+  try {
+    const project = await app.Project.getActiveProject();
+    const mkTT = (s) => app.TickTime.createWithSeconds(s);
+    P.v = "get scale param";
+    const scale = await getScaleParam(clip);
+    if (!scale) return { ok: false, error: "no Scale param on clip" };
+
+    P.v = "enable time-varying";
+    await project.lockedAccess(() => {
+      project.executeTransaction((c) => { c.addAction(scale.createSetTimeVaryingAction(true)); }, "AI Edit: enable Scale keyframes");
+    });
+
+    const kfs = [[atSec - ramp, 100], [atSec, peak], [atSec + hold, peak], [atSec + hold + ramp, 100]];
+    const errs = []; let usedShape = -1;
+    P.v = "add keyframes";
+    await project.lockedAccess(() => {
+      project.executeTransaction((c) => {
+        for (const [t, v] of kfs) {
+          const s = addScaleKeyframeAction(c, scale, mkTT(Math.max(0, t)), v, errs);
+          if (s >= 0) usedShape = s;
+        }
+      }, "AI Edit: scale punch-in");
+    });
+    if (usedShape < 0) { lastZoomError = "no keyframe shape worked → " + errs.map((m, i) => `[${i}] ${m}`).filter(Boolean).join(" | "); return { ok: false, error: lastZoomError }; }
+    return { ok: true, shape: usedShape };
+  } catch (e) {
+    lastZoomError = `phase=${P.v} :: ${e && e.message ? e.message : e}`;
+    return { ok: false, error: lastZoomError };
+  }
+}
+
+const editTestBtn = $("#edit-test-zoom");
+if (editTestBtn) editTestBtn.addEventListener("click", () => withBusy(editTestBtn, "Testing…", async () => {
+  const st = $("#edit-status"); st.className = "ai-status"; st.classList.remove("hidden");
+  st.textContent = "Adding a test punch-in…";
+  const project = await ppro.Project.getActiveProject();
+  const sequence = project && await project.getActiveSequence();
+  if (!sequence) { st.className = "ai-status err"; st.textContent = "No active sequence."; return; }
+  const clip = await getSelectedVideoClip(sequence);
+  if (!clip) { st.className = "ai-status err"; st.textContent = "Select a video clip on the timeline first."; return; }
+  let cs = 0, cd = 0;
+  try { const s = await clip.getStartTime(); cs = s ? s.seconds : 0; } catch (_) {}
+  try { const d = await clip.getDuration(); cd = d ? d.seconds : 0; } catch (_) {}
+  const at = cs + Math.min(cd * 0.5, 1.2);
+  const r = await emphasisZoom(clip, at, { peak: 112, hold: 0.4, ramp: 0.25 });
+  if (r.ok) { st.className = "ai-status"; st.textContent = `✅ Punch-in added (shape ${r.shape}). Scrub the clip to see the zoom. If it looks right, I'll wire the AI to place these automatically.`; }
+  else { st.className = "ai-status err"; st.textContent = "Keyframe failed → " + r.error; }
+}));
 
 // ── Helper status (Settings view) ────────────────────────────────
 async function checkHelper() {
