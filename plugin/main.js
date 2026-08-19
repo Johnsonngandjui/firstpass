@@ -1511,13 +1511,18 @@ if (editTestBtn) editTestBtn.addEventListener("click", () => withBusy(editTestBt
   if (!sequence) { st.className = "ai-status err"; st.textContent = "No active sequence."; return; }
   const clip = await getSelectedVideoClip(sequence);
   if (!clip) { st.className = "ai-status err"; st.textContent = "Select a video clip on the timeline first."; return; }
-  let cs = 0, cd = 0;
-  try { const s = await clip.getStartTime(); cs = s ? s.seconds : 0; } catch (_) {}
+  let si = 0, cd = 0;
+  try { const p = await clip.getInPoint(); si = p ? p.seconds : 0; } catch (_) {}   // SOURCE-time base
   try { const d = await clip.getDuration(); cd = d ? d.seconds : 0; } catch (_) {}
-  const at = cs + Math.min(cd * 0.5, 1.2);
-  const r = await emphasisZoom(clip, at, { peak: 112, hold: 0.4, ramp: 0.25 });
-  if (r.ok) { st.className = "ai-status"; st.textContent = `✅ Punch-in added (shape ${r.shape}). Scrub the clip to see the zoom.`; }
-  else { st.className = "ai-status err"; st.textContent = "Keyframe failed → " + r.error; }
+  // slow push across the whole clip so it's obvious, in source time
+  const kf = [[si + 0.05, 100], [si + Math.max(0.2, cd - 0.05), 112]];
+  const r = await applyScaleKeyframes(clip, kf);
+  if (r.ok && !r.skipped) {
+    const lo = si - 0.1, hi = si + cd + 0.1;
+    const inRange = (r.placed || []).filter(t => t >= lo && t <= hi).length;
+    st.className = inRange >= 2 ? "ai-status" : "ai-status err";
+    st.textContent = (inRange >= 2 ? "✅ " : "⚠️ ") + `Push added. Clip source ${si.toFixed(2)}–${(si + cd).toFixed(2)}s, keyframes at [${(r.placed || []).join(", ")}] — ${inRange}/${(r.placed || []).length} inside the clip.`;
+  } else { st.className = "ai-status err"; st.textContent = "Keyframe failed → " + (r.error || "unknown"); }
 }));
 
 // Generic scale-keyframe writer (used by AI Edit moves). kfList: [[timelineSec, scale%]].
@@ -1537,7 +1542,13 @@ async function applyScaleKeyframes(clip, kfList) {
     }, "AI Edit: keyframes");
   });
   if (used < 0) return { ok: false, error: "kf failed → " + errs.map((m, i) => `[${i}] ${m}`).filter(Boolean).join(" | ") };
-  return { ok: true };
+  // Read back the keyframes so the caller can VERIFY they landed where intended.
+  let placed = [];
+  try {
+    const list = await scale.getKeyframeListAsTickTimes();
+    placed = (list || []).map(t => (t && t.seconds != null) ? +t.seconds.toFixed(2) : t);
+  } catch (_) {}
+  return { ok: true, shape: used, wanted: kfList.map(k => +k[0].toFixed(2)), placed };
 }
 
 // A move → concrete keyframes on the clip's timeline range [cs, cs+cd].
@@ -1574,7 +1585,9 @@ async function gatherShots(sequence) {
   return clips.map((c, idx) => {
     const words = allWords.filter(w => w.start >= c.srcIn - 0.05 && w.start < c.srcIn + c.dur + 0.05);
     const text = words.map(w => w.word).join(" ").trim();
-    return { i: idx, seconds: +c.dur.toFixed(2), text, _clip: c.it, _start: c.start, _dur: c.dur };
+    // _srcIn is the base for keyframes — clip-effect keyframes live in SOURCE
+    // (media) time, not sequence time.
+    return { i: idx, seconds: +c.dur.toFixed(2), text, _clip: c.it, _start: c.start, _dur: c.dur, _srcIn: c.srcIn };
   });
 }
 
@@ -1636,20 +1649,40 @@ async function applyEditPlan() {
   overlayShow("Adding camera moves");
   const moves = editPlan.shots || [];
   const withMotion = moves.filter(m => m.move !== "static");
-  let done = 0, applied = 0, failed = "";
+  let done = 0, applied = 0, failed = "", verify = null;
   for (const m of withMotion) {
     const s = editShots.find(x => x.i === m.i); if (!s) continue;
-    const kf = moveKeyframes(s._start, s._dur, m);
+    // keyframes in SOURCE time: base at the clip's in-point, span [srcIn, srcIn+dur]
+    const kf = moveKeyframes(s._srcIn, s._dur, m);
     const r = await applyScaleKeyframes(s._clip, kf);
-    if (r.ok && !r.skipped) applied++;
-    else if (!r.ok && !failed) failed = r.error;
+    if (r.ok && !r.skipped) {
+      applied++;
+      // verify against the FIRST applied shot: keyframes must sit inside the clip
+      if (!verify) {
+        const lo = s._srcIn - 0.1, hi = s._srcIn + s._dur + 0.1;
+        const inRange = (r.placed || []).filter(t => t >= lo && t <= hi).length;
+        verify = { i: m.i, srcIn: +s._srcIn.toFixed(2), dur: +s._dur.toFixed(2), placed: r.placed, inRange, total: (r.placed || []).length };
+      }
+    } else if (!r.ok && !failed) failed = r.error;
     done++;
     overlayProgress(6 + done / (withMotion.length || 1) * 94, `Shot ${done} of ${withMotion.length}`, `${done}/${withMotion.length}`);
     await sleep(120);
   }
   overlayHide();
+
+  // Surface the read-back verification in the status area so we KNOW it worked.
+  const st = $("#edit-status"); st.classList.remove("hidden");
+  if (applied && verify) {
+    const ok = verify.inRange >= 2;
+    st.className = ok ? "ai-status" : "ai-status err";
+    st.textContent = (ok ? "✅ " : "⚠️ ") +
+      `Applied ${applied} move${applied === 1 ? "" : "s"}. Shot ${verify.i + 1}: clip source ${verify.srcIn}–${(verify.srcIn + verify.dur).toFixed(2)}s, keyframes at [${(verify.placed || []).join(", ")}] — ${verify.inRange}/${verify.total} inside the clip.` +
+      (ok ? "" : " Keyframes landed OUTSIDE the clip range — wrong time base.");
+  } else {
+    st.className = "ai-status err";
+    st.textContent = "No moves applied" + (failed ? " — " + failed : ".");
+  }
   if (applied) toast(`Added ${applied} camera move${applied === 1 ? "" : "s"}. (Cmd+Z to undo.)`);
-  else toast("No moves applied" + (failed ? " — " + failed : "."), true);
 }
 
 const editPlanBtn = $("#edit-plan");
