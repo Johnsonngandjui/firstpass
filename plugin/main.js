@@ -1177,18 +1177,20 @@ async function addTimelineMarkers(cuts) {
     const markers = await resolveMarkersObj(sequence);
     if (!markers) { lastMarkerError = "could not resolve a Markers object (tried sequence + Markers class + projectItem)"; return 0; }
     const mkTT = (s) => ppro.TickTime.createWithSeconds(s);
+    // Marker type — prefer the build's enum, fall back to the string "Comment".
+    const MT = (ppro.Constants && ppro.Constants.MarkerType) || {};
+    const cType = MT.COMMENT ?? MT.Comment ?? MT.Chapter ?? Object.values(MT)[0] ?? "Comment";
 
-    // Every plausible create-a-marker shape this build might expose. We try each
-    // per cut inside the transaction and keep the first that yields an action.
+    // createAddMarkerAction(name, type, startTime, duration, comment) — plus a few
+    // fallbacks in case type/duration ordering differs. Errors are collected so a
+    // rescan shows exactly which signature is off.
+    const errs = [];
     const attempts = [
-      // (a) action-factory on the Markers object, various arg orders
-      (c) => markers.createAddMarkerAction && markers.createAddMarkerAction(c.label, mkTT(c.startSec), "Comment", "", mkTT(0)),
-      (c) => markers.createAddMarkerAction && markers.createAddMarkerAction(mkTT(c.startSec), c.label, "", 0),
-      (c) => markers.createAddMarkerAction && markers.createAddMarkerAction(c.label, mkTT(c.startSec)),
-      (c) => markers.createMarkerAction && markers.createMarkerAction(mkTT(c.startSec), c.label),
-      // (b) build a Marker via ppro.Marker, then add it
-      (c) => ppro.Marker && ppro.Marker.createMarker && markers.createAddMarkerAction &&
-             markers.createAddMarkerAction(ppro.Marker.createMarker(c.label, mkTT(c.startSec))),
+      (c) => markers.createAddMarkerAction(c.label || "cut", cType, mkTT(c.startSec), mkTT(0), c.label || ""),
+      (c) => markers.createAddMarkerAction(c.label || "cut", "Comment", mkTT(c.startSec), mkTT(0), ""),
+      (c) => markers.createAddMarkerAction(c.label || "cut", cType, mkTT(c.startSec), 0, ""),
+      (c) => markers.createAddMarkerAction(c.label || "cut", mkTT(c.startSec), mkTT(0), cType, ""),
+      (c) => markers.createAddMarkerAction(mkTT(c.startSec), c.label || "cut", cType, mkTT(0), ""),
     ];
 
     let count = 0, chosen = -1;
@@ -1200,12 +1202,12 @@ async function addTimelineMarkers(cuts) {
             try {
               const a = attempts[i](c);
               if (a) { compound.addAction(a); count++; chosen = i; break; }
-            } catch (e) { if (!lastMarkerError) lastMarkerError = `attempt ${i}: ${e && e.message ? e.message : e}`; }
+            } catch (e) { if (chosen === -1) errs[i] = (e && e.message ? e.message : String(e)); }
           }
         }
       }, "ClipCutter: add markers");
     });
-    if (!count && !lastMarkerError) lastMarkerError = "no create-marker shape produced an action";
+    if (!count) lastMarkerError = "all signatures failed → " + errs.map((m, i) => `[${i}] ${m}`).filter(Boolean).join(" | ");
     return count;
   } catch (e) {
     lastMarkerError = e && e.message ? e.message : String(e);
@@ -1479,6 +1481,7 @@ async function buildEditReport() {
     markerClassStatics,
     markersClassStatics,
     markerClassProto: markerClass,
+    markerTypeEnum: (() => { try { return ppro.Constants && ppro.Constants.MarkerType ? JSON.parse(JSON.stringify(ppro.Constants.MarkerType)) : "(no Constants.MarkerType)"; } catch (_) { return "(unreadable)"; } })(),
     lastMarkerError: lastMarkerError || "(none — try Add b-roll markers first)"
   };
   lastEditReport = report;
@@ -1508,6 +1511,7 @@ function renderDiagnostics(report) {
     `host: ${report.host}\nclips on V1: ${report.trackItemCount}\n\n` +
     `★ IN-PLACE EDIT CANDIDATES (${primitives.length}):\n${primitives.join("\n") || "(none found)"}\n\n` +
     `★ MARKER API — last error: ${report.lastMarkerError}\n` +
+    `MarkerType enum: ${JSON.stringify(report.markerTypeEnum)}\n` +
     fmt("resolved Markers object methods", report.markersObj) +
     fmt("ppro.Markers statics", report.markersClassStatics) +
     fmt("ppro.Marker statics", report.markerClassStatics) +
