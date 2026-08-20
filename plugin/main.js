@@ -281,10 +281,10 @@ async function getSequenceInfo() {
   return { project, sequence, seqName: sequence.name, mediaPath, duration };
 }
 
-// Gather the source ranges of every clip the cut will target (scope + media
-// match). Cached so review counts can update synchronously as cuts toggle.
+// Gather the source ranges of EVERY target clip (scope), tagged with its media,
+// across every distinct source file. Cached so review counts stay synchronous.
 let clipMetas = [];
-async function gatherClipMetas(mp) {
+async function gatherClipMetas() {
   clipMetas = [];
   try {
     const project = await ppro.Project.getActiveProject();
@@ -302,18 +302,39 @@ async function gatherClipMetas(mp) {
         if (!include) continue;
         let itMp = null, si = 0, du = 0;
         try { const rc = ppro.ClipProjectItem.cast(await it.getProjectItem()); itMp = rc ? await rc.getMediaFilePath() : null; } catch (_) {}
-        if (mp && itMp && itMp !== mp) continue;
         try { const p = await it.getInPoint();  si = p ? p.seconds : 0; } catch (_) {}
         try { const d = await it.getDuration(); du = d ? d.seconds : 0; } catch (_) {}
-        clipMetas.push({ si, du });
+        clipMetas.push({ si, du, media: itMp });
       }
     }
   } catch (_) {}
 }
 
+// Distinct source files across the scope's target clips (each gets its own pass).
+async function gatherTargetMedia() {
+  const project = await ppro.Project.getActiveProject();
+  const sequence = project && await project.getActiveSequence();
+  if (!sequence) return [];
+  const CLIP = ppro.Constants?.TrackItemType?.Clip ?? 1;
+  const selMode = scopeValue() === "selected";
+  let vCount = 1; try { vCount = await sequence.getVideoTrackCount(); } catch (_) {}
+  const set = new Set();
+  for (let vt = 0; vt < vCount; vt++) {
+    const trk = await sequence.getVideoTrack(vt).catch(() => null);
+    if (!trk) continue;
+    for (const it of (await trk.getTrackItems(CLIP, false) || [])) {
+      let include = !selMode;
+      if (selMode) { try { include = await it.getIsSelected(); } catch (_) { include = false; } }
+      if (!include) continue;
+      try { const rc = ppro.ClipProjectItem.cast(await it.getProjectItem()); const mp = rc ? await rc.getMediaFilePath() : null; if (mp) set.add(mp); } catch (_) {}
+    }
+  }
+  return [...set];
+}
+
 // Real on-timeline totals for a set of cuts: for each target clip, count only
-// the cuts inside ITS source range (clips can be trimmed differently) and sum.
-// Matches exactly what Apply does — synchronous, uses the cached clip metas.
+// the cuts of ITS media inside ITS source range (clips can be trimmed
+// differently). Synchronous — uses the cached clip metas.
 function multiClipTotals(cuts) {
   if (!clipMetas.length) {
     return { count: cuts.length, clips: 1,
@@ -322,6 +343,7 @@ function multiClipTotals(cuts) {
   let count = 0, removable = 0;
   for (const m of clipMetas) {
     for (const c of cuts) {
+      if (c._media && m.media && c._media !== m.media) continue;   // cut belongs to another source file
       if (c.endSec > m.si + 0.01 && c.startSec < m.si + m.du - 0.01) {
         count++;
         const s = Math.max(c.startSec, m.si), e = Math.min(c.endSec, m.si + m.du);
@@ -370,9 +392,11 @@ function filterByKind(kind, cuts) {
   return cuts;
 }
 
+let mediaDurations = {};   // media path → duration (multi-clip sequences)
 async function runAnalyze(kind) {
-  const info = await getSequenceInfo();
-  mediaPath = info.mediaPath;
+  const info = await getSequenceInfo();   // validates project/sequence + selection
+  const medias = await gatherTargetMedia();
+  if (!medias.length) throw new Error("No clips found for this scope.");
 
   const padBefore = parseFloat($("#pad-before")?.value ?? "0.1") || 0;
   const padAfter  = parseFloat($("#pad-after")?.value ?? "0.1") || 0;
@@ -385,30 +409,44 @@ async function runAnalyze(kind) {
   const smart        = isOn("sw-smart-silence");
   const wantsWords   = wantsFiller || wantsRepeats || (wantsSilence && smart);
 
-  const params = {
-    media_paths:    [mediaPath],
-    seq_name:       info.seqName,
-    silence_db:     parseFloat($("#sil-thresh").value),
-    silence_dur:    parseFloat($("#sil-dur").value),
-    padding_ms:     paddingMs,
-    detect_silence: wantsSilence,   // filler/repeats-only passes must NOT emit silence cuts
-    remove_fillers: wantsFiller,
-    detect_takes:   wantsRepeats,
-    transcribe:     wantsWords,
-    similarity:     sensSimilarity(),
-    fillers:        wantsFiller ? selectedFillers() : null,   // the chips you picked
-    keep_last:      isOn("sw-keep-last"),                      // Repeats: keep last vs first take
-    smart_silence:  smart,
-    auto_threshold: smart
-  };
-
-  const status = await startAndPoll(params);
-  allCuts = filterByKind(kind, status.cuts || []);
-  allWords = status.words || [];
-  mediaDuration = status.duration ?? mediaDuration;
+  allCuts = []; allWords = []; mediaDurations = {};
   currentKind = kind;
-  lastAnalysis = status;   // keep loudness/method for the stats readout
-  await gatherClipMetas(mediaPath);   // clip source ranges for real per-clip totals
+  let primaryStatus = null;
+
+  // Analyze EACH distinct source file and tag its cuts, so every clip — not
+  // just the first — gets cleaned. (Different clips = different media = need
+  // their own transcription/analysis.)
+  for (let mi = 0; mi < medias.length; mi++) {
+    const M = medias[mi];
+    if (medias.length > 1) toast(`Analyzing clip ${mi + 1} of ${medias.length}…`);
+    const params = {
+      media_paths:    [M],
+      seq_name:       info.seqName,
+      silence_db:     parseFloat($("#sil-thresh").value),
+      silence_dur:    parseFloat($("#sil-dur").value),
+      padding_ms:     paddingMs,
+      detect_silence: wantsSilence,
+      remove_fillers: wantsFiller,
+      detect_takes:   wantsRepeats,
+      transcribe:     wantsWords,
+      similarity:     sensSimilarity(),
+      fillers:        wantsFiller ? selectedFillers() : null,
+      keep_last:      isOn("sw-keep-last"),
+      smart_silence:  smart,
+      auto_threshold: smart
+    };
+    const status = await startAndPoll(params);
+    // prefix ids with the media index so they stay unique across clips
+    const cuts = filterByKind(kind, status.cuts || []).map(c => ({ ...c, _media: M, id: mi + ":" + c.id }));
+    allCuts.push(...cuts);
+    mediaDurations[M] = status.duration;
+    if (!primaryStatus) { primaryStatus = status; allWords = (status.words || []).map(w => ({ ...w, _media: M })); }
+  }
+
+  mediaPath = medias[0];
+  mediaDuration = mediaDurations[medias[0]] ?? mediaDuration;
+  lastAnalysis = primaryStatus;   // loudness/method readout reflects the first clip
+  await gatherClipMetas();         // ALL target clips, tagged with media
 }
 
 let lastAnalysis = null;
@@ -428,8 +466,11 @@ function updateSilenceStats() {
 
 // ── Review: word transcript (filler / repeats / master) ──────────
 function buildWordClassMap() {
+  // The transcript shown is the FIRST clip's; only highlight cuts of that same
+  // media (other clips' cuts are in a different time base and would mis-align).
+  const primaryMedia = allWords[0]?._media;
   const cuts = allCuts
-    .filter(c => c.type === "filler" || c.type === "repeated_take")
+    .filter(c => (c.type === "filler" || c.type === "repeated_take") && (!primaryMedia || !c._media || c._media === primaryMedia))
     .slice().sort((a, b) => a.startSec - b.startSec);
 
   const idxToCut = new Array(allWords.length).fill(null);
@@ -643,15 +684,15 @@ async function rebuildInPlace(app, project, sequence, cuts, ripple, onStep) {
         try { rawIt = await it.getProjectItem(); } catch (_) {}
         srcC = rawIt ? app.ClipProjectItem.cast(rawIt) : null;
         try { mp = srcC ? await srcC.getMediaFilePath() : null; } catch (_) {}
-        // only cut clips of the media we analyzed
-        if (mediaPath && mp && mp !== mediaPath) continue;
+        // cuts are matched to each clip by media below — so include EVERY target
+        // clip here, not just clips of one source file.
         if (!srcC || typeof srcC.createSetInOutPointsAction !== "function") continue;
 
         let cs = 0, ci = 0, cd = 0;
         try { const s = await it.getStartTime(); cs = s ? s.seconds : 0; } catch (_) {}
         try { const p = await it.getInPoint();   ci = p ? p.seconds : 0; } catch (_) {}
         try { const d = await it.getDuration();  cd = d ? d.seconds : 0; } catch (_) {}
-        clipsMeta.push({ vIndex: vt, clipStart: cs, clipSourceIn: ci, clipDur: cd, rawItem: rawIt, srcClip: srcC });
+        clipsMeta.push({ vIndex: vt, clipStart: cs, clipSourceIn: ci, clipDur: cd, rawItem: rawIt, srcClip: srcC, media: mp });
       }
     }
     if (!clipsMeta.length) return { ok: false, missing: [selMode ? "a selected clip of this media" : "clips of this media"] };
@@ -675,9 +716,11 @@ async function rebuildInPlace(app, project, sequence, cuts, ripple, onStep) {
     // means this media was already split into fragments by an earlier pass (e.g.
     // Silence removal) — the cut times are in ORIGINAL media time and would map
     // to the wrong spot, so we must NOT apply it. Count those so we can warn.
-    const fitsClip = (cu, m) =>
+    // a cut only applies to a clip of its OWN media, and only if it fits inside.
+    const sameMedia = (cu, m) => !cu._media || !m.media || cu._media === m.media;
+    const fitsClip = (cu, m) => sameMedia(cu, m) &&
       cu.startSec >= m.clipSourceIn - 0.05 && cu.endSec <= m.clipSourceIn + m.clipDur + 0.05;
-    const overlapsClip = (cu, m) =>
+    const overlapsClip = (cu, m) => sameMedia(cu, m) &&
       cu.endSec > m.clipSourceIn + 0.01 && cu.startSec < m.clipSourceIn + m.clipDur - 0.01;
     const cutsInClip = (m) => cutsDesc.filter(cu => fitsClip(cu, m));
     let spanningCuts = 0;   // overlap some clip but fit in none → fragmented timeline
