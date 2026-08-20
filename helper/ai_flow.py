@@ -316,3 +316,62 @@ def _validate_edit(plan: dict, shots: list[dict]) -> dict:
     plan["shots"] = out
     plan.setdefault("notes", "")
     return plan
+
+
+# ── AI repeated-take detection (semantic, replaces string matching) ──────────
+_REPEATS_SYSTEM = (
+    "You find REPEATED TAKES in a talking-head transcript — places where the "
+    "speaker said the SAME thing more than once because they re-recorded a line, "
+    "EVEN IF the wording differs. You group each set of re-takes together and "
+    "keep ONE (the cleanest / most complete, usually the LAST), marking the "
+    "others for removal. You never group segments that merely share a topic but "
+    "actually say something NEW — only true re-takes of the same point."
+)
+
+_REPEATS_SCHEMA = """Return ONLY valid JSON:
+{
+  "groups": [
+    {"segment_ids": [<ids that are re-takes of THE SAME thing, 2 or more>],
+     "keep": <the id to keep>,
+     "why": "<short reason>"}
+  ]
+}
+Rules:
+- Only group segments that express the SAME point re-said (a redo), even if the
+  words differ. Different points, examples, or new information are NOT repeats.
+- "keep" MUST be one of that group's segment_ids. Default to the LAST unless an
+  earlier take is clearly more complete.
+- If nothing is a re-take, return {"groups": []}.
+"""
+
+
+def find_repeats(words: list[dict], keep_last: bool = True) -> list[dict]:
+    """Semantic repeated-take detection. Returns cut ranges [{start,end,text}]
+    for the takes to REMOVE (all but the kept one in each re-take group)."""
+    segments = segment_transcript(words)
+    if len(segments) < 2:
+        return []
+    lines = "\n".join(f'[{s["id"]}] "{s["text"]}"' for s in segments)
+    raw = _chat(_REPEATS_SYSTEM, f"{_REPEATS_SCHEMA}\nSegments:\n{lines}", want_json=True)
+    try:
+        plan = json.loads(raw)
+    except json.JSONDecodeError:
+        a, b = raw.find("{"), raw.rfind("}")
+        plan = json.loads(raw[a:b + 1]) if a != -1 and b != -1 else {"groups": []}
+
+    by_id = {s["id"]: s for s in segments}
+    cuts, used = [], set()
+    for g in (plan.get("groups") or []):
+        ids = [i for i in (g.get("segment_ids") or []) if i in by_id and i not in used]
+        if len(ids) < 2:
+            continue
+        keep = g.get("keep")
+        if keep not in ids:
+            keep = ids[-1] if keep_last else ids[0]
+        for i in ids:
+            used.add(i)
+            if i == keep:
+                continue
+            s = by_id[i]
+            cuts.append({"start": s["start"], "end": s["end"], "text": s["text"]})
+    return cuts

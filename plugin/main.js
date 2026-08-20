@@ -439,8 +439,9 @@ async function runAnalyze(kind) {
     // prefix ids with the media index so they stay unique across clips
     const cuts = filterByKind(kind, status.cuts || []).map(c => ({ ...c, _media: M, id: mi + ":" + c.id }));
     allCuts.push(...cuts);
+    allWords.push(...(status.words || []).map(w => ({ ...w, _media: M })));   // keep EVERY clip's words
     mediaDurations[M] = status.duration;
-    if (!primaryStatus) { primaryStatus = status; allWords = (status.words || []).map(w => ({ ...w, _media: M })); }
+    if (!primaryStatus) primaryStatus = status;
   }
 
   mediaPath = medias[0];
@@ -465,18 +466,23 @@ function updateSilenceStats() {
 }
 
 // ── Review: word transcript (filler / repeats / master) ──────────
-function buildWordClassMap() {
-  // The transcript shown is the FIRST clip's; only highlight cuts of that same
-  // media (other clips' cuts are in a different time base and would mis-align).
-  const primaryMedia = allWords[0]?._media;
+// The review transcript shows the FIRST clip only (multiple clips' words can't
+// share one coherent view); the CUTS still apply to every clip.
+function reviewWords() {
+  const pm = allWords[0]?._media;
+  return allWords.filter(w => !pm || !w._media || w._media === pm);
+}
+
+function buildWordClassMap(words) {
+  const primaryMedia = words[0]?._media;
   const cuts = allCuts
     .filter(c => (c.type === "filler" || c.type === "repeated_take") && (!primaryMedia || !c._media || c._media === primaryMedia))
     .slice().sort((a, b) => a.startSec - b.startSec);
 
-  const idxToCut = new Array(allWords.length).fill(null);
+  const idxToCut = new Array(words.length).fill(null);
   let ci = 0;
-  for (let i = 0; i < allWords.length; i++) {
-    const w = allWords[i];
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
     while (ci < cuts.length && cuts[ci].endSec <= w.start) ci++;
     if (ci < cuts.length && w.start >= cuts[ci].startSec && w.start < cuts[ci].endSec) {
       idxToCut[i] = cuts[ci];
@@ -487,15 +493,15 @@ function buildWordClassMap() {
   // cut, mark the next same-length run of un-cut words as the retained take.
   const decorative = new Set();
   const seen = new Set();
-  for (let i = 0; i < allWords.length; i++) {
+  for (let i = 0; i < words.length; i++) {
     const cut = idxToCut[i];
     if (!cut || cut.type !== "repeated_take" || !cut.enabled || seen.has(cut.id)) continue;
     seen.add(cut.id);
     let j = i;
-    while (j < allWords.length && idxToCut[j] === cut) j++;
+    while (j < words.length && idxToCut[j] === cut) j++;
     const len = j - i;
     let k = j, count = 0;
-    while (k < allWords.length && count < len) {
+    while (k < words.length && count < len) {
       if (!idxToCut[k]) { decorative.add(k); count++; }
       k++;
     }
@@ -506,15 +512,16 @@ function buildWordClassMap() {
 function renderWordTranscript() {
   const box = $("#transcript");
   box.classList.toggle("no-highlight", !isOn("sw-highlight"));   // "Highlight in transcript" toggle
-  if (!allWords.length) {
+  const words = reviewWords();
+  if (!words.length) {
     box.innerHTML = '<p style="color:var(--text-mute);">No transcript available — run Analyze first.</p>';
     return;
   }
-  const { idxToCut, decorative } = buildWordClassMap();
+  const { idxToCut, decorative } = buildWordClassMap(words);
   // Only wrap HIGHLIGHTED words in a <span>; leave untouched words as plain text.
   // A 10-min clip has ~2000 words — a span each makes the scroll container crawl
   // in UXP. Plain text collapses the untouched runs into cheap text nodes.
-  const parts = allWords.map((w, i) => {
+  const parts = words.map((w, i) => {
     const cut = idxToCut[i];
     const text = escapeHtml(w.word);
     if (cut) {
@@ -1311,10 +1318,11 @@ $$("[data-refresh]").forEach(b => b.addEventListener("click", () =>
 // ── AI Flow (reorder / b-roll / pacing) ──────────────────────────
 let flowPlan = null, flowSegs = null;
 
-// The post-cleanup transcript = words NOT inside any enabled cut.
+// The post-cleanup transcript = words NOT inside any enabled cut (of their own media).
 function keptWords() {
   const cuts = allCuts.filter(c => c.enabled);
-  return allWords.filter(w => !cuts.some(c => w.start >= c.startSec && w.start < c.endSec));
+  return allWords.filter(w => !cuts.some(c =>
+    (!c._media || !w._media || c._media === w._media) && w.start >= c.startSec && w.start < c.endSec));
 }
 const segById = (id) => (flowSegs || []).find(s => s.id === id);
 
@@ -1626,12 +1634,14 @@ async function gatherShots(sequence) {
     const trk = await sequence.getVideoTrack(vt).catch(() => null);
     if (!trk) continue;
     for (const it of (await trk.getTrackItems(CLIP, false) || [])) {
-      let st = 0, du = 0, si = 0;
+      let st = 0, du = 0, si = 0, mp = null;
       try { const s = await it.getStartTime(); st = s ? s.seconds : 0; } catch (_) {}
       try { const d = await it.getDuration();  du = d ? d.seconds : 0; } catch (_) {}
       try { const p = await it.getInPoint();   si = p ? p.seconds : 0; } catch (_) {}
-      const words = allWords.filter(w => w.start >= si - 0.05 && w.start < si + du + 0.05);
-      clips.push({ it, start: st, dur: du, srcIn: si, words });
+      try { const rc = ppro.ClipProjectItem.cast(await it.getProjectItem()); mp = rc ? await rc.getMediaFilePath() : null; } catch (_) {}
+      // words of THIS clip's media within its source range
+      const words = allWords.filter(w => (!w._media || !mp || w._media === mp) && w.start >= si - 0.05 && w.start < si + du + 0.05);
+      clips.push({ it, start: st, dur: du, srcIn: si, media: mp, words });
     }
   }
   clips.sort((a, b) => a.start - b.start);

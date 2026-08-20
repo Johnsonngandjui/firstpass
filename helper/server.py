@@ -227,10 +227,18 @@ async def _run_analyze(job_id: str, req: AnalyzeRequest):
             # 5. Repeated take detection ───────────────────────────────────
             if req.detect_takes and words:
                 upd(85, "Finding repeated takes…")
-                take_cuts = _find_repeated_takes(words, padding_ms=req.padding_ms,
-                                                  similarity=req.similarity,
-                                                  keep_last=req.keep_last)
-                # plus immediate stutters/false-starts the take detector misses
+                # Prefer the AI (semantic) repeat finder — it catches re-takes
+                # that were re-worded, which string matching misses. Fall back to
+                # the string method if the local model isn't reachable.
+                take_cuts = []
+                try:
+                    import ai_flow
+                    take_cuts = ai_flow.find_repeats(words, keep_last=req.keep_last)
+                except Exception:
+                    take_cuts = _find_repeated_takes(words, padding_ms=req.padding_ms,
+                                                     similarity=req.similarity,
+                                                     keep_last=req.keep_last)
+                # plus immediate stutters/false-starts (cheap, always useful)
                 take_cuts += _find_stutters(words, padding_ms=req.padding_ms)
                 for c in take_cuts:
                     cuts.append({
