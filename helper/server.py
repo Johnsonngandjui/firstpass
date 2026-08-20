@@ -227,19 +227,22 @@ async def _run_analyze(job_id: str, req: AnalyzeRequest):
             # 5. Repeated take detection ───────────────────────────────────
             if req.detect_takes and words:
                 upd(85, "Finding repeated takes…")
-                # Prefer the AI (semantic) repeat finder — it catches re-takes
-                # that were re-worded, which string matching misses. Fall back to
-                # the string method if the local model isn't reachable.
-                take_cuts = []
+                # Two-stage so one copy always survives:
+                # 1) collapse false-start RESTARTS + immediate stutters (keeps the
+                #    last of each), then
+                # 2) run the semantic AI re-take dedup on the SURVIVORS only, so it
+                #    never removes the copy the restart pass just kept.
+                pre = _find_phrase_repeats(words) + _find_stutters(words, padding_ms=req.padding_ms)
+                def _incut(w, cs):
+                    return any(w["start"] >= c["start"] and w["start"] < c["end"] - 0.001 for c in cs)
+                survivors = [w for w in words if not _incut(w, pre)]
                 try:
                     import ai_flow
-                    take_cuts = ai_flow.find_repeats(words, keep_last=req.keep_last)
+                    rep = ai_flow.find_repeats(survivors, keep_last=req.keep_last)
                 except Exception:
-                    take_cuts = _find_repeated_takes(words, padding_ms=req.padding_ms,
-                                                     similarity=req.similarity,
-                                                     keep_last=req.keep_last)
-                # plus immediate stutters/false-starts (cheap, always useful)
-                take_cuts += _find_stutters(words, padding_ms=req.padding_ms)
+                    rep = _find_repeated_takes(survivors, padding_ms=req.padding_ms,
+                                               similarity=req.similarity, keep_last=req.keep_last)
+                take_cuts = pre + rep
                 for c in take_cuts:
                     cuts.append({
                         "id":       f"t{cut_id}", "type": "repeated_take",
@@ -657,6 +660,48 @@ def _find_repeated_takes(words: list[dict], padding_ms: int,
 
 
 # ── Fix 3: stutters / immediate short repeats ──────────────────────────────
+def _find_phrase_repeats(words: list[dict], min_len: int = 3, max_len: int = 8,
+                         max_gap: int = 5, similarity: float = 0.85) -> list[dict]:
+    """False-start RESTARTS: a phrase said, then re-said after only a FEW words of
+    junk ("i think i may have just cooked, so this is — i think i may have just
+    cooked"). Cut the first occurrence + the little junk, keep the last. The gap
+    between the two occurrences must be small — a whole sentence in between means
+    they're two separate uses, not a restart, so we leave those for the semantic
+    pass and don't cut across them."""
+    window = max_gap
+    n = len(words)
+    cuts = []
+    def norm(k): return words[k]["word"].strip(".,?!").lower()
+
+    i = 0
+    while i < n:
+        best = None
+        for L in range(max_len, min_len - 1, -1):
+            if i + L > n:
+                continue
+            a = " ".join(norm(i + x) for x in range(L))
+            if not a.strip():
+                continue
+            for j in range(i + L, min(n - L + 1, i + L + window)):
+                b = " ".join(norm(j + x) for x in range(L))
+                if a == b or SequenceMatcher(None, a, b).ratio() >= similarity:
+                    best = (L, j); break
+            if best:
+                break
+        if best:
+            L, j = best
+            cut_start = max(0.0, words[i]["start"] - 0.05)
+            if i > 0:
+                cut_start = max(words[i - 1]["end"], cut_start)
+            cut_end = words[j]["start"] - 0.02          # keep the LAST occurrence
+            if cut_end - cut_start > 0.1:
+                cuts.append({"start": cut_start, "end": cut_end, "text": a + " (restart)"})
+            i = j                                        # chain from the kept occurrence
+        else:
+            i += 1
+    return cuts
+
+
 def _find_stutters(words: list[dict], padding_ms: int,
                    max_phrase: int = 4, similarity: float = 0.85) -> list[dict]:
     """
