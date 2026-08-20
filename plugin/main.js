@@ -898,10 +898,11 @@ async function assembleReorder(app, project, sequence, orderedSegs, onStep) {
     try { vCount = await sequence.getVideoTrackCount(); } catch (_) {}
     try { aCount = await sequence.getAudioTrackCount(); } catch (_) {}
 
-    // Source clip of the analyzed media (RAW ProjectItem needed for overwrite) +
-    // its video-track index + the current timeline extent.
-    P.v = "find source";
-    let rawItem = null, srcClip = null, vIndex = 0, origEnd = 0;
+    // Build a map media → { rawItem (RAW ProjectItem for overwrite), srcClip } so
+    // each segment can be placed from ITS OWN source file. Also the timeline extent.
+    P.v = "find sources";
+    const srcByMedia = {};
+    let origEnd = 0;
     for (let vt = 0; vt < vCount; vt++) {
       const trk = await sequence.getVideoTrack(vt).catch(() => null);
       if (!trk) continue;
@@ -910,35 +911,34 @@ async function assembleReorder(app, project, sequence, orderedSegs, onStep) {
         try { const s = await it.getStartTime(); st = s ? s.seconds : 0; } catch (_) {}
         try { const d = await it.getDuration();  du = d ? d.seconds : 0; } catch (_) {}
         origEnd = Math.max(origEnd, st + du);
-        if (!rawItem) {
-          let ri = null, sc = null, mp = null;
-          try { ri = await it.getProjectItem(); } catch (_) {}
-          sc = ri ? app.ClipProjectItem.cast(ri) : null;
-          try { mp = sc ? await sc.getMediaFilePath() : null; } catch (_) {}
-          if (!mediaPath || !mp || mp === mediaPath) { rawItem = ri; srcClip = sc; vIndex = vt; }
-        }
+        let ri = null, sc = null, mp = null;
+        try { ri = await it.getProjectItem(); } catch (_) {}
+        sc = ri ? app.ClipProjectItem.cast(ri) : null;
+        try { mp = sc ? await sc.getMediaFilePath() : null; } catch (_) {}
+        if (mp && !srcByMedia[mp] && sc && typeof sc.createSetInOutPointsAction === "function") srcByMedia[mp] = { rawItem: ri, srcClip: sc };
       }
     }
-    if (!rawItem || !srcClip) return { ok: false, missing: ["source clip of the analyzed media"] };
-    if (typeof srcClip.createSetInOutPointsAction !== "function") return { ok: false, missing: ["ClipProjectItem.createSetInOutPointsAction"] };
+    if (!Object.keys(srcByMedia).length) return { ok: false, missing: ["source clip(s) of the segments"] };
 
-    // ── Lay each segment (new order) at a running position within the extent ──
+    // ── Lay each segment (new order) from its own source, on V1, running pos ──
     P.v = "assemble";
     const total = orderedSegs.length || 1;
     let pos = 0, n = 0;
     for (const seg of orderedSegs) {
       const inS = seg.start, outS = seg.end, len = Math.max(0, outS - inS);
       if (len <= 0.03) continue;
+      const src = srcByMedia[seg.media] || srcByMedia[Object.keys(srcByMedia)[0]];
+      if (!src) continue;
       P.v = `setInOut(${inS.toFixed(2)},${outS.toFixed(2)})`;
       await project.lockedAccess(() => {
         project.executeTransaction((c) => {
-          c.addAction(srcClip.createSetInOutPointsAction(mkTT(inS), mkTT(outS)));
+          c.addAction(src.srcClip.createSetInOutPointsAction(mkTT(inS), mkTT(outS)));
         }, "ClipCutter: segment in/out");
       });
-      P.v = `overwrite@${pos.toFixed(2)}(v=${vIndex})`;
+      P.v = `overwrite@${pos.toFixed(2)}`;
       await project.lockedAccess(() => {
         project.executeTransaction((c) => {
-          c.addAction(editor.createOverwriteItemAction(rawItem, mkTT(pos), vIndex, 0));
+          c.addAction(editor.createOverwriteItemAction(src.rawItem, mkTT(pos), 0, 0));
         }, "ClipCutter: place segment");
       });
       pos += len; n++;
@@ -993,12 +993,14 @@ async function applyReorder() {
   // A segment's [start,end] SPANS the gaps Master removed (silences, fillers,
   // earlier repeat takes). Placing the whole span from source would re-introduce
   // that removed content and undo Master's cuts. So expand each segment into only
-  // its KEPT spans — the ranges left after subtracting the enabled cuts.
-  const cuts = allCuts.filter(c => c.enabled).slice().sort((a, b) => a.startSec - b.startSec);
-  const keptWithin = (s, e) => {
+  // its KEPT spans — the ranges left after subtracting the enabled cuts OF ITS
+  // OWN media — and tag each span with which source file it comes from.
+  const enabled = allCuts.filter(c => c.enabled);
+  const keptWithin = (s, e, media) => {
+    const cuts = enabled.filter(c => !c._media || !media || c._media === media).sort((a, b) => a.startSec - b.startSec);
     const spans = []; let cur = s;
     for (const c of cuts) {
-      if (c.endSec <= s || c.startSec >= e) continue;      // no overlap with this segment
+      if (c.endSec <= s || c.startSec >= e) continue;
       if (c.startSec > cur) spans.push({ start: cur, end: Math.min(c.startSec, e) });
       cur = Math.max(cur, c.endSec);
     }
@@ -1010,7 +1012,10 @@ async function applyReorder() {
   for (const id of flowPlan.order) {
     const s = flowSegs.find(x => x.id === id);
     if (!s) continue;
-    for (const sp of keptWithin(s.start, s.end)) orderedSegs.push(sp);
+    const M = s._media;
+    const a = s._srcStart != null ? s._srcStart : s.start;
+    const b = s._srcEnd != null ? s._srcEnd : s.end;
+    for (const sp of keptWithin(a, b, M)) orderedSegs.push({ start: sp.start, end: sp.end, media: M });
   }
   if (!orderedSegs.length) throw new Error("Nothing to assemble.");
 
@@ -1316,7 +1321,33 @@ $$("[data-refresh]").forEach(b => b.addEventListener("click", () =>
 ));
 
 // ── AI Flow (reorder / b-roll / pacing) ──────────────────────────
-let flowPlan = null, flowSegs = null;
+let flowPlan = null, flowSegs = null, flowGlobal = null;
+
+// Lay every clip's KEPT words on one global timeline (with a gap between clips)
+// so AI Flow can reorder segments ACROSS clips, and we can map each segment back
+// to its own source file.
+function buildGlobalTimeline() {
+  const kept = keptWords();
+  const order = [];
+  for (const m of clipMetas) if (m.media && !order.includes(m.media)) order.push(m.media);
+  if (!order.length) { const pm = kept[0]?._media; if (pm) order.push(pm); }
+  const offsets = {}, gWords = [];
+  const GAP = 3;   // seconds between clips → guarantees a segment break at each seam
+  let off = 0;
+  for (const M of order) {
+    const mw = kept.filter(w => (w._media || order[0]) === M).sort((a, b) => a.start - b.start);
+    if (!mw.length) continue;
+    offsets[M] = off;
+    for (const w of mw) gWords.push({ word: w.word, start: +(w.start + off).toFixed(3), end: +(w.end + off).toFixed(3), _media: M });
+    off += mw[mw.length - 1].end + GAP;
+  }
+  return { gWords, offsets, order };
+}
+function mediaAtGlobal(gStart, offsets, order) {
+  let best = order[0], bestOff = -1;
+  for (const M of order) { if (offsets[M] != null && offsets[M] <= gStart + 0.001 && offsets[M] > bestOff) { best = M; bestOff = offsets[M]; } }
+  return best;
+}
 
 // The post-cleanup transcript = words NOT inside any enabled cut (of their own media).
 function keptWords() {
@@ -1327,7 +1358,9 @@ function keptWords() {
 const segById = (id) => (flowSegs || []).find(s => s.id === id);
 
 async function planFlow() {
-  const words = keptWords();
+  const g = buildGlobalTimeline();
+  flowGlobal = g;
+  const words = g.gWords;
   if (!words.length) throw new Error("No transcript yet — run Master (or an analysis) first.");
   const status = $("#flow-status");
   status.className = "ai-status";
@@ -1351,6 +1384,13 @@ async function planFlow() {
   const data = await resp.json();
   if (!data.plan) { status.textContent = data.message || "Not enough distinct segments to reorder."; return; }
   flowPlan = data.plan; flowSegs = data.segments;
+  // map each global-time segment back to its own source file + source times
+  for (const s of flowSegs) {
+    const M = mediaAtGlobal(s.start, flowGlobal.offsets, flowGlobal.order);
+    s._media = M;
+    s._srcStart = s.start - (flowGlobal.offsets[M] || 0);
+    s._srcEnd = s.end - (flowGlobal.offsets[M] || 0);
+  }
   status.classList.add("hidden");
   renderFlowPlan(data);
 }
@@ -1425,8 +1465,9 @@ function renderFlowPlan(data) {
 // engine: kept spans (segment minus enabled cuts) laid end-to-end in topic
 // order. So b-roll markers land at the right spot on the REORDERED timeline.
 function assemblyEndById() {
-  const cuts = allCuts.filter(c => c.enabled).slice().sort((a, b) => a.startSec - b.startSec);
-  const keptLen = (s, e) => {
+  const enabled = allCuts.filter(c => c.enabled);
+  const keptLen = (s, e, media) => {
+    const cuts = enabled.filter(c => !c._media || !media || c._media === media).sort((a, b) => a.startSec - b.startSec);
     let len = 0, cur = s;
     for (const c of cuts) {
       if (c.endSec <= s || c.startSec >= e) continue;
@@ -1441,7 +1482,9 @@ function assemblyEndById() {
   for (const id of (flowPlan && flowPlan.order) || []) {
     const s = flowSegs.find(x => x.id === id);
     if (!s) continue;
-    pos += keptLen(s.start, s.end);
+    const a = s._srcStart != null ? s._srcStart : s.start;
+    const b = s._srcEnd != null ? s._srcEnd : s.end;
+    pos += keptLen(a, b, s._media);
     endById[id] = pos;               // timeline seconds at this segment's end
   }
   return endById;
