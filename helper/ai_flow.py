@@ -15,14 +15,15 @@ from typing import Optional
 
 # ── Model backend (swap here to change providers) ───────────────────────────
 OLLAMA_URL   = "http://localhost:11434"
-OLLAMA_MODEL = "qwen2.5:14b-instruct"
+OLLAMA_MODEL = "qwen2.5:14b-instruct"          # the one local model — filler, flow, dedup
 
 
-def _chat(system: str, user: str, want_json: bool = True, timeout: int = 180) -> str:
+def _chat(system: str, user: str, want_json: bool = True, timeout: int = 600,
+          model: str = None) -> str:
     """One chat turn against the local model. Returns the raw assistant text.
     Raises RuntimeError with a clear message if the model/runtime isn't ready."""
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": model or OLLAMA_MODEL,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user",   "content": user},
@@ -62,6 +63,34 @@ def model_ready() -> dict:
         return {"runtime": True, "model": have, "model_name": OLLAMA_MODEL, "installed": names}
     except Exception as e:
         return {"runtime": False, "model": False, "model_name": OLLAMA_MODEL, "error": str(e)}
+
+
+def loaded_models() -> list[str]:
+    """Names of models Ollama currently holds in memory (the big ones eat RAM)."""
+    try:
+        with urllib.request.urlopen(f"{OLLAMA_URL}/api/ps", timeout=4) as r:
+            return [m.get("name", "") for m in json.load(r).get("models", [])]
+    except Exception:
+        return []
+
+
+def unload_models() -> dict:
+    """Evict ClipCutter's local models from memory so Premiere gets the RAM back
+    for smooth editing. Uses Ollama's keep_alive:0 (an empty generate call that
+    tells the runtime to drop the model immediately). Safe if already unloaded."""
+    freed = []
+    for m in (OLLAMA_MODEL,):
+        try:
+            req = urllib.request.Request(
+                f"{OLLAMA_URL}/api/generate",
+                data=json.dumps({"model": m, "keep_alive": 0}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=15):
+                pass
+            freed.append(m)
+        except Exception:
+            pass
+    return {"freed": freed, "still_loaded": loaded_models()}
 
 
 # ── Transcript → reorderable segments ───────────────────────────────────────
@@ -158,30 +187,85 @@ Rules:
 """
 
 
+def _loads(raw: str) -> dict:
+    """Parse a JSON object out of a model reply, tolerating prose wrappers."""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        a, b = raw.find("{"), raw.rfind("}")
+        if a == -1 or b == -1:
+            raise RuntimeError(f"Model did not return JSON. Got: {raw[:200]}")
+        return json.loads(raw[a:b + 1])
+
+
+def _cleanest(ids: list[int], by_id: dict) -> int:
+    """Pick the cleanest take of a re-take group: prefer one that ends as a full
+    sentence, with the fewest [uh]/[um] fillers, then the most complete (longest)."""
+    def score(i):
+        t = (by_id[i]["text"] or "").strip()
+        ends = t.endswith((".", "!", "?"))
+        fillers = t.count("[uh]") + t.count("[um]")
+        return (ends, -fillers, len(t))
+    return max(ids, key=score)
+
+
+def _dedup_segments(segments: list[dict]):
+    """Find repeated takes (14B clustering) and drop all but the cleanest of each.
+    Returns (survivor_ids_in_order, dropped_ids, groups)."""
+    if len(segments) < 2:
+        return [s["id"] for s in segments], [], []
+    lines = "\n".join(f'[{s["id"]}] "{s["text"]}"' for s in segments)
+    plan = _loads(_chat(_REPEATS_SYSTEM, f"{_REPEATS_SCHEMA}\nSegments:\n{lines}",
+                        want_json=True)) or {"groups": []}
+    by_id = {s["id"]: s for s in segments}
+    dropped, groups_out, used = [], [], set()
+    for g in (plan.get("groups") or []):
+        ids = [i for i in (g.get("segment_ids") or []) if i in by_id and i not in used]
+        if len(ids) < 2:
+            continue
+        # Always pick the cleanest ourselves — the model's own "keep" is unreliable
+        # (it kept a garbled false-start over the clean re-take), so we trust the
+        # heuristic: prefer a complete sentence, fewest [uh]/[um], most complete.
+        keep = _cleanest(ids, by_id)
+        for i in ids:
+            used.add(i)
+            if i != keep:
+                dropped.append(i)
+        groups_out.append({"ids": ids, "keep": keep})
+    survivors = [s["id"] for s in segments if s["id"] not in dropped]
+    return survivors, sorted(dropped), groups_out
+
+
 def plan_flow(words: list[dict], goal: Optional[str] = None) -> dict:
-    """Build the topic-grouped story plan from a transcript. Returns the plan plus
-    the segment table the UXP panel needs to map ids back to source timecodes."""
+    """AI Flow = coherent cut + story arrange, both on the 14B model:
+      1. remove REPEATED TAKES (keep the cleanest of each re-said line), then
+      2. group the survivors by topic and arrange them into a story.
+    Returns the plan plus the FULL segment table so the panel can map ids→timecode
+    (dropped takes stay in the table but are excluded from `order`)."""
     segments = segment_transcript(words)
     if len(segments) < 2:
         return {"segments": segments, "plan": None,
                 "message": "Not enough distinct segments to arrange."}
 
-    seg_lines = "\n".join(
-        f'[{s["id"]}] ({s["start"]:.1f}-{s["end"]:.1f}s) "{s["text"]}"' for s in segments
-    )
-    user = f"{_SCHEMA_INSTRUCTIONS}\nSegments:\n{seg_lines}"
+    # 1. Coherent cut — drop repeated takes.
+    survivor_ids, dropped_ids, groups = _dedup_segments(segments)
+    survivor_segs = [s for s in segments if s["id"] in survivor_ids]
 
-    raw = _chat(_SYSTEM, user, want_json=True)
-    try:
-        plan = json.loads(raw)
-    except json.JSONDecodeError:
-        # models sometimes wrap JSON in prose — grab the outermost object
-        s, e = raw.find("{"), raw.rfind("}")
-        if s == -1 or e == -1:
-            raise RuntimeError(f"Model did not return JSON. Got: {raw[:200]}")
-        plan = json.loads(raw[s:e + 1])
+    # 2. Story arrange the survivors.
+    if len(survivor_segs) >= 2:
+        seg_lines = "\n".join(
+            f'[{s["id"]}] ({s["start"]:.1f}-{s["end"]:.1f}s) "{s["text"]}"' for s in survivor_segs
+        )
+        plan = _loads(_chat(_SYSTEM, f"{_SCHEMA_INSTRUCTIONS}\nSegments:\n{seg_lines}",
+                            want_json=True))
+        plan = _validate_plan(plan, survivor_segs)
+    else:
+        plan = _validate_plan({"topics": []}, survivor_segs)
 
-    plan = _validate_plan(plan, segments)
+    # 3. Attach what the cut removed so the panel can show it.
+    by = {s["id"]: s for s in segments}
+    plan["dropped"] = dropped_ids
+    plan["removed"] = [{"id": i, "text": by[i]["text"]} for i in dropped_ids if i in by]
     return {"segments": segments, "plan": plan}
 
 

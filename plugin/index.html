@@ -500,7 +500,7 @@ body {
 .fmt.active .fmt-radio::after {
   content: "";
   position: absolute;
-  inset: 3px;
+  top: 3px; right: 3px; bottom: 3px; left: 3px;   /* UXP drops `inset` shorthand */
   border-radius: 50%;
   background: var(--blue);
 }
@@ -676,7 +676,11 @@ body {
 .toast.err { border-color: var(--red); color: #ff9a9e; }
 /* ══ APPLY OVERLAY (AI "working" animation) ═══════════════════ */
 .overlay {
-  position: fixed; inset: 0;
+  /* UXP DROPS the `inset` shorthand (like `padding: 0 Npx`) — with no
+     top/right/bottom/left the fixed overlay collapses to zero size and only the
+     "Working…" button shows behind it. Longhand each side so it fills the panel. */
+  position: fixed; top: 0; right: 0; bottom: 0; left: 0;
+  width: 100%; height: 100%;
   background: rgba(16,16,19,0.78);
   display: flex; align-items: center; justify-content: center;
   z-index: 100;
@@ -957,6 +961,7 @@ body {
           <div class="fmt" data-w="1920" data-h="1080" data-orient="Landscape" role="button" tabindex="0"><span class="fmt-radio"></span><span class="fmt-body"><span class="fmt-main">1920 × 1080</span><span class="fmt-sub">FHD • 16:9</span></span><span class="fmt-tag land">Landscape</span></div>
           <div class="fmt" data-w="3840" data-h="2160" data-orient="Landscape" role="button" tabindex="0"><span class="fmt-radio"></span><span class="fmt-body"><span class="fmt-main">3840 × 2160</span><span class="fmt-sub">4K • 16:9</span></span><span class="fmt-tag land">Landscape</span></div>
           <div class="fmt" data-w="3840" data-h="2560" data-orient="Landscape" role="button" tabindex="0"><span class="fmt-radio"></span><span class="fmt-body"><span class="fmt-main">3840 × 2560</span><span class="fmt-sub">4K • 3:2</span></span><span class="fmt-tag land">Landscape</span></div>
+          <div class="fmt" data-w="3840" data-h="2880" data-orient="Landscape" role="button" tabindex="0"><span class="fmt-radio"></span><span class="fmt-body"><span class="fmt-main">3840 × 2880</span><span class="fmt-sub">4K • 4:3</span></span><span class="fmt-tag land">Landscape</span></div>
 
           <div class="fmt-group">Portrait</div>
           <div class="fmt" data-w="1080" data-h="1920" data-orient="Portrait" role="button" tabindex="0"><span class="fmt-radio"></span><span class="fmt-body"><span class="fmt-main">1080 × 1920</span><span class="fmt-sub">FHD • 9:16 • Reels • TikTok</span></span><span class="fmt-tag port">Portrait</span></div>
@@ -995,13 +1000,20 @@ body {
           <span class="flex-spacer"></span>
           <div class="btn primary" data-analyze="master" role="button" tabindex="0">Run full cleanup</div>
         </div>
+
+        <p class="hint-note" style="margin-top:20px;">Done with the AI passes? Free the local model from memory so Premiere plays back smoothly. It reloads automatically next time you run AI Flow.</p>
+        <div class="action-bar">
+          <span id="free-mem-status" style="font-size:11.5px;color:var(--text-dim);"></span>
+          <span class="flex-spacer"></span>
+          <div class="btn secondary" id="free-mem" role="button" tabindex="0">Free memory</div>
+        </div>
       </section>
 
       <!-- ── AI Flow ────────────────────────────────────────── -->
       <section class="view" data-view="flow">
         <header class="view-head">
           <h1>AI Flow</h1>
-          <p>Groups your clips by topic and arranges them into a story that's easy to follow — reviewed before anything moves.</p>
+          <p>Removes repeated takes, then groups what's left by topic and arranges it into a story that's easy to follow — reviewed before anything moves.</p>
         </header>
 
         <p class="hint-note">Uses the transcript from your last <b>Master</b> (or analysis). Runs a local model on your Mac — no cloud, no cost. A long clip may take a minute.</p>

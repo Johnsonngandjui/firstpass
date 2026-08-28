@@ -8,7 +8,7 @@ Dependencies (see requirements.txt):
   ffmpeg must be on PATH
 """
 
-import asyncio, json, os, re, shutil, subprocess, sys, tempfile, urllib.parse, uuid, wave
+import asyncio, json, os, re, shutil, subprocess, sys, tempfile, threading, urllib.parse, uuid, wave
 import xml.sax.saxutils as _sx
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -94,6 +94,45 @@ def ai_status():
         return {"runtime": False, "model": False, "error": str(e)}
 
 
+# ── Session state (crash-safe resume) ───────────────────────────────────────
+# The panel's arrange plan lives in memory and is lost if Premiere crashes.
+# We mirror it to a small JSON file on disk so that after a crash + reopen the
+# user gets their arrangement back and can just re-apply — no re-running Arrange.
+_STATE_PATH = Path(__file__).with_name("clipcutter_state.json")
+
+
+@app.post("/save_state")
+async def save_state(request: Request):
+    try:
+        body = await request.body()
+        _STATE_PATH.write_bytes(body or b"{}")
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/load_state")
+def load_state():
+    try:
+        if not _STATE_PATH.exists():
+            return {"ok": True, "state": None}
+        raw = _STATE_PATH.read_text(encoding="utf-8") or ""
+        return {"ok": True, "state": json.loads(raw) if raw.strip() else None}
+    except Exception as e:
+        # A corrupt state file must never wedge the panel — report empty.
+        return {"ok": True, "state": None, "error": str(e)}
+
+
+@app.post("/clear_state")
+def clear_state():
+    try:
+        if _STATE_PATH.exists():
+            _STATE_PATH.unlink()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
 @app.post("/plan_flow")
 def plan_flow_route(req: PlanFlowRequest):
     try:
@@ -101,6 +140,18 @@ def plan_flow_route(req: PlanFlowRequest):
         return ai_flow.plan_flow(req.words, goal=req.goal)
     except RuntimeError as e:
         raise HTTPException(503, str(e))
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/free_models")
+def free_models_route():
+    """Unload the local Qwen models from memory so Premiere edits stay smooth."""
+    try:
+        import ai_flow
+        result = ai_flow.unload_models()
+        print("Premiere freed up memory", flush=True)   # visible in clipcutter_helper.log
+        return result
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -133,7 +184,11 @@ def _whisper_available() -> bool:
 async def start_analyze(req: AnalyzeRequest):
     job_id = str(uuid.uuid4())[:8]
     jobs[job_id] = {"state": "running", "progress": 0, "message": "Queued", "cuts": []}
-    asyncio.create_task(_run_analyze(job_id, req))
+    # Run the job in a background THREAD, not on the event loop. Transcription and
+    # ffmpeg are blocking CPU/GPU work with NO awaits — as an asyncio task they
+    # froze the loop so /status polls couldn't return until the job finished (the
+    # panel's progress bar could never update and the button hung on "Working…").
+    threading.Thread(target=_run_analyze, args=(job_id, req), daemon=True).start()
     return {"job_id": job_id}
 
 
@@ -145,7 +200,7 @@ def get_status(job_id: str):
     return job
 
 
-async def _run_analyze(job_id: str, req: AnalyzeRequest):
+def _run_analyze(job_id: str, req: AnalyzeRequest):
     def upd(pct, msg):
         jobs[job_id].update({"progress": pct, "message": msg})
 

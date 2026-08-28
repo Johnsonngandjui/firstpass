@@ -17,6 +17,11 @@ const PROBE_INSERT = false;  // probe done: insert needs the RAW ProjectItem, no
 const $  = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
+// Build marker — bump when you change the panel so a reload is easy to confirm.
+// After reloading in UDT, this line appears in the UDT debug console.
+const BUILD = "flow-14b+progress-overlay · 2026-08-20";
+console.log("ClipCutter panel loaded — build:", BUILD);
+
 entrypoints.setup({ panels: { main: { show() {}, hide() {} } } });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -355,7 +360,7 @@ function multiClipTotals(cuts) {
 }
 
 // ── Helper: analyze (POST + poll) ─────────────────────────────────
-async function startAndPoll(params) {
+async function startAndPoll(params, onProgress) {
   const startResp = await fetch(`${HELPER}/analyze`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -371,6 +376,7 @@ async function startAndPoll(params) {
     await new Promise(r => setTimeout(r, 700));
     const s = await fetch(`${HELPER}/status/${job_id}`);
     const status = await s.json();
+    if (onProgress) onProgress(status.progress || 0, status.message || "Working…");
     if (status.state === "done") return status;
     if (status.state === "error") throw new Error(status.message || "Unknown helper error.");
   }
@@ -394,60 +400,86 @@ function filterByKind(kind, cuts) {
 
 let mediaDurations = {};   // media path → duration (multi-clip sequences)
 async function runAnalyze(kind) {
-  const info = await getSequenceInfo();   // validates project/sequence + selection
-  const medias = await gatherTargetMedia();
-  if (!medias.length) throw new Error("No clips found for this scope.");
+  // Show the overlay IMMEDIATELY on click — before the (sometimes slow) sequence
+  // and clip scan — so you never sit on a bare "Working…" button with no feedback.
+  const overlayTitle = { master: "Cleaning every clip", filler: "Finding filler words",
+    repeats: "Finding repeated takes", silence: "Finding dead air" }[kind] || "Analyzing";
+  overlayShow(overlayTitle);
+  const t0 = Date.now();
+  const elapsed = () => {
+    const s = Math.floor((Date.now() - t0) / 1000);
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")} elapsed`;
+  };
+  overlayProgress(1, "Reading your sequence…", elapsed());
 
-  const padBefore = parseFloat($("#pad-before")?.value ?? "0.1") || 0;
-  const padAfter  = parseFloat($("#pad-after")?.value ?? "0.1") || 0;
-  const paddingMs = Math.round(((padBefore + padAfter) / 2) * 1000);
+  try {
+    const info = await getSequenceInfo();   // validates project/sequence + selection
+    const medias = await gatherTargetMedia();
+    if (!medias.length) throw new Error("No clips found for this scope.");
 
-  const wantsFiller  = kind === "filler"  || (kind === "master" && isOn("m-filler"));
-  const wantsRepeats = kind === "repeats" || (kind === "master" && isOn("m-repeats"));
-  // "Smart dead-air" needs a transcript for speech-gap detection.
-  const wantsSilence = kind === "silence" || (kind === "master" && isOn("m-silence"));
-  const smart        = isOn("sw-smart-silence");
-  const wantsWords   = wantsFiller || wantsRepeats || (wantsSilence && smart);
+    const padBefore = parseFloat($("#pad-before")?.value ?? "0.1") || 0;
+    const padAfter  = parseFloat($("#pad-after")?.value ?? "0.1") || 0;
+    const paddingMs = Math.round(((padBefore + padAfter) / 2) * 1000);
 
-  allCuts = []; allWords = []; mediaDurations = {};
-  currentKind = kind;
-  let primaryStatus = null;
+    const wantsFiller  = kind === "filler"  || (kind === "master" && isOn("m-filler"));
+    const wantsRepeats = kind === "repeats" || (kind === "master" && isOn("m-repeats"));
+    // "Smart dead-air" needs a transcript for speech-gap detection.
+    const wantsSilence = kind === "silence" || (kind === "master" && isOn("m-silence"));
+    const smart        = isOn("sw-smart-silence");
+    const wantsWords   = wantsFiller || wantsRepeats || (wantsSilence && smart);
 
-  // Analyze EACH distinct source file and tag its cuts, so every clip — not
-  // just the first — gets cleaned. (Different clips = different media = need
-  // their own transcription/analysis.)
-  for (let mi = 0; mi < medias.length; mi++) {
-    const M = medias[mi];
-    if (medias.length > 1) toast(`Analyzing clip ${mi + 1} of ${medias.length}…`);
-    const params = {
-      media_paths:    [M],
-      seq_name:       info.seqName,
-      silence_db:     parseFloat($("#sil-thresh").value),
-      silence_dur:    parseFloat($("#sil-dur").value),
-      padding_ms:     paddingMs,
-      detect_silence: wantsSilence,
-      remove_fillers: wantsFiller,
-      detect_takes:   wantsRepeats,
-      transcribe:     wantsWords,
-      similarity:     sensSimilarity(),
-      fillers:        wantsFiller ? selectedFillers() : null,
-      keep_last:      isOn("sw-keep-last"),
-      smart_silence:  smart,
-      auto_threshold: smart
-    };
-    const status = await startAndPoll(params);
-    // prefix ids with the media index so they stay unique across clips
-    const cuts = filterByKind(kind, status.cuts || []).map(c => ({ ...c, _media: M, id: mi + ":" + c.id }));
-    allCuts.push(...cuts);
-    allWords.push(...(status.words || []).map(w => ({ ...w, _media: M })));   // keep EVERY clip's words
-    mediaDurations[M] = status.duration;
-    if (!primaryStatus) primaryStatus = status;
+    allCuts = []; allWords = []; mediaDurations = {};
+    currentKind = kind;
+    let primaryStatus = null;
+
+    overlayProgress(2, `Preparing ${medias.length} clip${medias.length === 1 ? "" : "s"}…`, elapsed());
+
+    // Analyze EACH distinct source file and tag its cuts, so every clip — not
+    // just the first — gets cleaned. (Different clips = different media = need
+    // their own transcription/analysis.)
+    for (let mi = 0; mi < medias.length; mi++) {
+      const M = medias[mi];
+      // Overall bar = this clip's slice of the whole run, filled by the live job
+      // progress inside it. So one clip still gets a moving 0→100 status bar.
+      const base = 2 + (mi / medias.length) * 96;
+      const span = 96 / medias.length;
+      const label = medias.length > 1 ? ` · clip ${mi + 1}/${medias.length}` : "";
+      overlayProgress(base, `Analyzing${label}…`, elapsed());
+      const onJob = (pct, msg) =>
+        overlayProgress(base + (pct / 100) * span, `${msg}${label}`, elapsed());
+      const params = {
+        media_paths:    [M],
+        seq_name:       info.seqName,
+        silence_db:     parseFloat($("#sil-thresh").value),
+        silence_dur:    parseFloat($("#sil-dur").value),
+        padding_ms:     paddingMs,
+        detect_silence: wantsSilence,
+        remove_fillers: wantsFiller,
+        detect_takes:   wantsRepeats,
+        transcribe:     wantsWords,
+        similarity:     sensSimilarity(),
+        fillers:        wantsFiller ? selectedFillers() : null,
+        keep_last:      isOn("sw-keep-last"),
+        smart_silence:  smart,
+        auto_threshold: smart
+      };
+      const status = await startAndPoll(params, onJob);
+      // prefix ids with the media index so they stay unique across clips
+      const cuts = filterByKind(kind, status.cuts || []).map(c => ({ ...c, _media: M, id: mi + ":" + c.id }));
+      allCuts.push(...cuts);
+      allWords.push(...(status.words || []).map(w => ({ ...w, _media: M })));   // keep EVERY clip's words
+      mediaDurations[M] = status.duration;
+      if (!primaryStatus) primaryStatus = status;
+    }
+
+    overlayProgress(99, "Mapping clips to the timeline…", elapsed());
+    mediaPath = medias[0];
+    mediaDuration = mediaDurations[medias[0]] ?? mediaDuration;
+    lastAnalysis = primaryStatus;   // loudness/method readout reflects the first clip
+    await gatherClipMetas();         // ALL target clips, tagged with media
+  } finally {
+    overlayHide();
   }
-
-  mediaPath = medias[0];
-  mediaDuration = mediaDurations[medias[0]] ?? mediaDuration;
-  lastAnalysis = primaryStatus;   // loudness/method readout reflects the first clip
-  await gatherClipMetas();         // ALL target clips, tagged with media
 }
 
 let lastAnalysis = null;
@@ -880,7 +912,13 @@ async function assembleReorder(app, project, sequence, orderedSegs, onStep) {
   try {
     const SE  = app.SequenceEditor;
     const TIS = app.TrackItemSelection;
-    const mkTT = (s) => app.TickTime.createWithSeconds(s);
+    // Never hand a NaN / negative / Infinite second-value to the native engine —
+    // an out-of-range TickTime is a prime candidate for a hard Premiere crash.
+    const mkTT = (s) => {
+      const v = Number(s);
+      if (!isFinite(v) || v < 0) throw new Error(`invalid time ${s}`);
+      return app.TickTime.createWithSeconds(Math.round(v * 1000) / 1000);
+    };
     const CLIP = app.Constants?.TrackItemType?.Clip ?? 1;
     const MTenum = (app.Constants && app.Constants.MediaType) || {};
     const MT = MTenum.ANY ?? Object.values(MTenum)[0];
@@ -921,34 +959,62 @@ async function assembleReorder(app, project, sequence, orderedSegs, onStep) {
     if (!Object.keys(srcByMedia).length) return { ok: false, missing: ["source clip(s) of the segments"] };
 
     // ── Lay each segment (new order) from its own source, on V1, running pos ──
+    // Contiguous placement: each segment starts exactly where the previous ended,
+    // so the insertion point is always ≤ the timeline's current end and overwrite
+    // extends cleanly (starting a placement in the VOID past the end is what throws
+    // "Invalid"/destabilises Premiere — we structurally never do that). `extent`
+    // tracks the growing end so we can HARD-GUARD against ever placing past it.
     P.v = "assemble";
     const total = orderedSegs.length || 1;
-    let pos = 0, n = 0;
-    for (const seg of orderedSegs) {
-      const inS = seg.start, outS = seg.end, len = Math.max(0, outS - inS);
-      if (len <= 0.03) continue;
-      const src = srcByMedia[seg.media] || srcByMedia[Object.keys(srcByMedia)[0]];
-      if (!src) continue;
-      P.v = `setInOut(${inS.toFixed(2)},${outS.toFixed(2)})`;
-      await project.lockedAccess(() => {
-        project.executeTransaction((c) => {
-          c.addAction(src.srcClip.createSetInOutPointsAction(mkTT(inS), mkTT(outS)));
-        }, "ClipCutter: segment in/out");
-      });
-      P.v = `overwrite@${pos.toFixed(2)}`;
-      await project.lockedAccess(() => {
-        project.executeTransaction((c) => {
-          c.addAction(editor.createOverwriteItemAction(src.rawItem, mkTT(pos), 0, 0));
-        }, "ClipCutter: place segment");
-      });
-      pos += len; n++;
-      step(6 + (n / total) * 80, `Placing segment ${n} of ${total}`, `${n} / ${total}`);
-      await sleep(140);
+    // pre-filter to valid, non-trivial segments so counts + guards are honest
+    const segs = orderedSegs.filter(s =>
+      s && isFinite(s.start) && isFinite(s.end) && s.start >= 0 && (s.end - s.start) > 0.03);
+    const requested = segs.length;
+    let pos = 0, n = 0, extent = origEnd, skipped = 0;
+    const srcKeys = Object.keys(srcByMedia);
+    for (const seg of segs) {
+      const inS = seg.start, outS = seg.end, len = outS - inS;
+      // Require the segment's OWN source. Only fall back when there's a single
+      // source on the timeline (so the fallback is unambiguously correct). Placing
+      // a segment's in/out against the WRONG media can point past that media's end
+      // — an out-of-range source range is a prime hard-crash trigger.
+      const src = srcByMedia[seg.media] || (srcKeys.length === 1 ? srcByMedia[srcKeys[0]] : null);
+      if (!src || !src.rawItem || !src.srcClip) { skipped++; continue; }
+      // Guard: the start must be within the current extent (+small tolerance).
+      // With contiguous placement pos==extent, so this only trips if a prior
+      // overwrite unexpectedly did NOT extend — in which case we STOP rather than
+      // fire an out-of-range overwrite that could crash Premiere.
+      if (pos > extent + 0.25) { skipped += (requested - n); break; }
+      try {
+        P.v = `setInOut(${inS.toFixed(2)},${outS.toFixed(2)})`;
+        await project.lockedAccess(() => {
+          project.executeTransaction((c) => {
+            c.addAction(src.srcClip.createSetInOutPointsAction(mkTT(inS), mkTT(outS)));
+          }, "ClipCutter: segment in/out");
+        });
+        P.v = `overwrite@${pos.toFixed(2)}`;
+        await project.lockedAccess(() => {
+          project.executeTransaction((c) => {
+            c.addAction(editor.createOverwriteItemAction(src.rawItem, mkTT(pos), 0, 0));
+          }, "ClipCutter: place segment");
+        });
+        pos += len; extent = Math.max(extent, pos); n++;
+        step(6 + (n / total) * 80, `Placing segment ${n} of ${total}`, `${n} / ${total}`);
+        await sleep(160);
+      } catch (segErr) {
+        // Isolate a single bad segment: skip it and keep going rather than aborting
+        // (and definitely rather than crashing). The tail trim still cleans up.
+        skipped++;
+        await sleep(120);
+      }
     }
     const assemblyLen = pos;
 
     // ── Trim the leftover tail (old content beyond the new assembly) ──────────
-    if (origEnd > assemblyLen + 0.05) {
+    // Wrapped so a stale-ref / bad-selection failure here can't crash or abort:
+    // the reassembly is already done; a failed trim just leaves harmless tail
+    // content the user can delete (and Cmd+Z still reverts everything).
+    if (n > 0 && origEnd > assemblyLen + 0.05) {
       P.v = `trim-tail@${assemblyLen.toFixed(2)}`;
       const findTail = async (track) => {
         const out = [];
@@ -958,25 +1024,27 @@ async function assembleReorder(app, project, sequence, orderedSegs, onStep) {
         }
         return out;
       };
-      await project.lockedAccess(async () => {
-        const tail = [];
-        for (let vt = 0; vt < vCount; vt++) tail.push(...await findTail(await sequence.getVideoTrack(vt).catch(() => null)));
-        for (let at = 0; at < aCount; at++) tail.push(...await findTail(await sequence.getAudioTrack(at).catch(() => null)));
-        if (!tail.length) return;
-        let sel = null;
-        TIS.createEmptySelection((x) => { sel = x; });
-        if (!sel) return;
-        for (const it of tail) sel.addItem(it, true);
-        project.executeTransaction((c) => {
-          const a = editor.createRemoveItemsAction(sel, true, MT, false);
-          if (a) c.addAction(a);
-        }, "ClipCutter: trim tail");
-      });
+      try {
+        await project.lockedAccess(async () => {
+          const tail = [];
+          for (let vt = 0; vt < vCount; vt++) tail.push(...await findTail(await sequence.getVideoTrack(vt).catch(() => null)));
+          for (let at = 0; at < aCount; at++) tail.push(...await findTail(await sequence.getAudioTrack(at).catch(() => null)));
+          if (!tail.length) return;
+          let sel = null;
+          TIS.createEmptySelection((x) => { sel = x; });
+          if (!sel) return;
+          for (const it of tail) { try { sel.addItem(it, true); } catch (_) {} }
+          project.executeTransaction((c) => {
+            const a = editor.createRemoveItemsAction(sel, true, MT, false);
+            if (a) c.addAction(a);
+          }, "ClipCutter: trim tail");
+        });
+      } catch (_) { /* leave the tail rather than risk a crash */ }
     }
 
     step(100, "Done", "");
     await sleep(180);
-    return { ok: true, placed: n, seconds: assemblyLen };
+    return { ok: true, placed: n, requested, skipped: Math.max(0, requested - n), seconds: assemblyLen };
   } catch (e) {
     const msg = (e && e.message) ? e.message : String(e);
     const err = new Error(`phase=${P.v} :: ${msg}`);
@@ -1013,11 +1081,20 @@ async function applyReorder() {
     const s = flowSegs.find(x => x.id === id);
     if (!s) continue;
     const M = s._media;
-    const a = s._srcStart != null ? s._srcStart : s.start;
-    const b = s._srcEnd != null ? s._srcEnd : s.end;
-    for (const sp of keptWithin(a, b, M)) orderedSegs.push({ start: sp.start, end: sp.end, media: M });
+    // Clamp the source range to the media's known duration so an out-of-range
+    // in/out can never reach Premiere's engine (a hard-crash trigger). Leave a
+    // 50ms margin off the end to stay safely inside the media.
+    const dur = (mediaDurations && mediaDurations[M]) ? mediaDurations[M] - 0.05 : Infinity;
+    const clamp = (t) => Math.max(0, Math.min(t, dur));
+    const a = clamp(s._srcStart != null ? s._srcStart : s.start);
+    const b = clamp(s._srcEnd != null ? s._srcEnd : s.end);
+    if (b - a <= 0.03) continue;
+    for (const sp of keptWithin(a, b, M)) {
+      const cs = clamp(sp.start), ce = clamp(sp.end);
+      if (ce - cs > 0.03) orderedSegs.push({ start: cs, end: ce, media: M });
+    }
   }
-  if (!orderedSegs.length) throw new Error("Nothing to assemble.");
+  if (!orderedSegs.length) throw new Error("Nothing to assemble — your arrangement is saved; try Arrange again.");
 
   const app = ppro;
   const project = await app.Project.getActiveProject();
@@ -1028,20 +1105,34 @@ async function applyReorder() {
   overlayShow("Reassembling your story");
   overlayProgress(4, "Reading the new order…", "");
 
+  // Flag the apply as in-flight BEFORE touching the timeline. If Premiere crashes
+  // mid-assemble, this flag survives on disk and the next launch shows a recovery
+  // hint (undo the partial edit, re-apply) with the arrangement intact.
+  await saveFlowState({ applying: true });
+
   let result;
   try {
     result = await assembleReorder(app, project, sequence, orderedSegs,
       (pct, sub, count) => overlayProgress(pct, sub, count));
   } catch (err) {
     overlayHide();
+    await saveFlowState({ applying: false });   // finished (with error) — not a crash
     throw new Error((err && err.message) ? err.message : String(err));
   }
   overlayHide();
 
   if (result.ok) {
-    toast(`Reassembled in the new order · ${result.placed} segments. (Cmd+Z to undo.)`);
+    if (!result.placed) {
+      await saveFlowState({ applying: false });   // keep plan for retry
+      throw new Error("Couldn't place any segments — the timeline is unchanged. Your arrangement is saved; try again.");
+    }
+    await clearFlowState();                        // applied cleanly — no stale restore next launch
+    const extra = (result.placed < result.requested)
+      ? ` · ${result.requested - result.placed} skipped` : "";
+    toast(`Reassembled in the new order · ${result.placed} segments${extra}. (Cmd+Z to undo.)`);
     return;
   }
+  await saveFlowState({ applying: false });   // primitives missing — nothing was touched
   throw new Error("Reorder unavailable — missing: " + result.missing.join(", "));
 }
 
@@ -1365,7 +1456,7 @@ async function planFlow() {
   const status = $("#flow-status");
   status.className = "ai-status";
   status.classList.remove("hidden");
-  status.textContent = "Grouping by topic and arranging the story… a long clip can take a minute.";
+  status.textContent = "Removing repeated takes and arranging the story… a long clip can take a minute.";
   $("#flow-result").classList.add("hidden");
 
   let resp;
@@ -1382,7 +1473,7 @@ async function planFlow() {
     return;
   }
   const data = await resp.json();
-  if (!data.plan) { status.textContent = data.message || "Not enough distinct segments to reorder."; return; }
+  if (!data.plan) { status.textContent = data.message || "Not enough distinct segments to arrange."; return; }
   flowPlan = data.plan; flowSegs = data.segments;
   // map each global-time segment back to its own source file + source times
   for (const s of flowSegs) {
@@ -1393,13 +1484,24 @@ async function planFlow() {
   }
   status.classList.add("hidden");
   renderFlowPlan(data);
+  saveFlowState({ applying: false });   // persist so a later crash can't lose it
 }
 
 function renderFlowPlan(data) {
   const plan = data.plan, segs = data.segments;
   const box = $("#flow-result");
-  const origOrder = segs.map(s => s.id);
+  const removed = plan.removed || [];      // repeated takes the coherent cut drops
+  const order = plan.order || [];          // survivors, in story order
+  const origOrder = order.slice().sort((a, b) => a - b);  // survivors in recorded order
   const P = [];
+
+  // Removed repeated takes — shown first so the user sees what the cut cleaned up.
+  if (removed.length) {
+    P.push(`<div class="flow-sec-title">Removed repeated takes (${removed.length})</div>`);
+    for (const r of removed) {
+      P.push(`<div class="flow-seg dropped"><span class="txt" style="text-decoration:line-through;opacity:.6">${escapeHtml(r.text || "")}</span></div>`);
+    }
+  }
 
   if (plan.hook && plan.hook.segment_id) {
     const h = segById(plan.hook.segment_id);
@@ -1408,7 +1510,7 @@ function renderFlowPlan(data) {
   }
 
   // Story = topics in order, each with its segments. A segment is "moved" if its
-  // new position differs from the original recording order.
+  // new position differs from the recorded order (of the survivors).
   P.push(`<div class="flow-sec-title">Story ${plan.reordered ? "· regrouped" : "· unchanged"}</div>`);
   let pos = 0;
   for (const t of (plan.topics || [])) {
@@ -1421,7 +1523,7 @@ function renderFlowPlan(data) {
         `<div class="flow-seg${moved ? " moved" : ""}">` +
         `<span class="idx">${pos + 1}</span>` +
         `<span class="txt">${escapeHtml(s.text)}</span>` +
-        (moved ? `<span class="movedtag">was #${id}</span>` : "") +
+        (moved ? `<span class="movedtag">moved</span>` : "") +
         `</div>`);
       pos++;
     }
@@ -1444,13 +1546,12 @@ function renderFlowPlan(data) {
   P.push(`<div class="action-bar" style="margin-top:14px;">
     <div class="btn secondary" id="flow-markers" role="button" tabindex="0">Add b-roll markers</div>
     <span class="flex-spacer"></span>
-    <div class="btn primary" id="flow-apply" role="button" tabindex="0">Apply reorder</div>
+    <div class="btn primary" id="flow-apply" role="button" tabindex="0">Apply cut &amp; reorder</div>
   </div>`);
-  if (plan.reordered) {
-    P.push(`<p class="hint-note" style="margin-top:2px;">“Apply reorder” rebuilds the timeline in this order from your source media. Review the warnings above first — <b>Cmd+Z undoes it</b>.</p>`);
-  } else {
-    P.push(`<p class="hint-note" style="margin-top:2px;">The model kept the original order, so “Apply reorder” would change nothing.</p>`);
-  }
+  const bits = [];
+  if (removed.length) bits.push("drops the repeated takes above");
+  if (plan.reordered) bits.push("rebuilds the timeline in this order");
+  P.push(`<p class="hint-note" style="margin-top:2px;">“Apply cut &amp; reorder” ${bits.length ? bits.join(" and ") : "reassembles the timeline"} from your source media. <b>Cmd+Z undoes it</b>.</p>`);
 
   box.innerHTML = P.join("");
   box.classList.remove("hidden");
@@ -1504,6 +1605,26 @@ async function applyBrollMarkers() {
 
 const flowBtn = $("#flow-plan");
 if (flowBtn) flowBtn.addEventListener("click", () => withBusy(flowBtn, "Planning…", planFlow));
+
+// Free the local Qwen models from RAM so Premiere playback stays smooth. They
+// reload on the next AI Flow run (first inference just pays the load time again).
+async function freeModels() {
+  const st = $("#free-mem-status");
+  if (st) st.textContent = "";
+  let resp;
+  try {
+    resp = await fetch(`${HELPER}/free_models`, { method: "POST" });
+  } catch (e) { throw new Error("Helper not reachable — is the server running?"); }
+  if (!resp.ok) throw new Error("Couldn't free memory — check the local model in Settings.");
+  const data = await resp.json();
+  const stillBig = (data.still_loaded || []).length;
+  if (st) st.textContent = stillBig
+    ? "Some models are still loading — try again in a moment."
+    : `Freed ${(data.freed || []).length} model${(data.freed || []).length === 1 ? "" : "s"} from memory.`;
+  toast(stillBig ? "Models still busy — try again shortly." : "Local model freed — Premiere has its memory back.");
+}
+const freeMemBtn = $("#free-mem");
+if (freeMemBtn) freeMemBtn.addEventListener("click", () => withBusy(freeMemBtn, "Freeing…", freeModels));
 
 // ── AI Edit: keyframe engine (emphasis scale zoom) ───────────────
 // ADBE Motion, Scale = param index 1 (probed). We keyframe it. The exact
@@ -1896,8 +2017,63 @@ async function checkHelper() {
   pill.innerHTML = `<span class="dot"></span>Offline`;
   if (hint) hint.textContent = "run python server.py";
 }
+// ── Crash-safe resume ────────────────────────────────────────────
+// The arrange plan lives only in memory, so a Premiere crash during "Apply cut
+// & reorder" would lose it. We mirror it to the helper (disk) after Arrange and
+// flag when an apply is in-flight, so on reopen the plan is restored and — if the
+// apply was interrupted — the user gets a clear recovery hint instead of a lost
+// session. All best-effort: persistence failures never block the actual editing.
+async function saveFlowState(patch) {
+  try {
+    const body = JSON.stringify({
+      v: 1, kind: "flow", savedAt: Date.now(),
+      plan: flowPlan, segs: flowSegs, cuts: allCuts, durs: mediaDurations,
+      ...(patch || {})
+    });
+    await fetch(`${HELPER}/save_state`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body
+    });
+  } catch (_) { /* offline / disk error — resume just won't be available */ }
+}
+async function clearFlowState() {
+  try { await fetch(`${HELPER}/clear_state`, { method: "POST" }); } catch (_) {}
+}
+
+async function restoreFlowState() {
+  let state = null;
+  try {
+    const r = await fetch(`${HELPER}/load_state`);
+    if (r.ok) state = (await r.json()).state;
+  } catch (_) { return; }               // helper offline — nothing to restore
+  if (!state || state.kind !== "flow" || !state.plan || !state.segs) return;
+
+  flowPlan = state.plan;
+  flowSegs = state.segs;
+  if (Array.isArray(state.cuts)) allCuts = state.cuts;   // needed to rebuild kept spans on Apply
+  if (state.durs && typeof state.durs === "object") mediaDurations = state.durs;
+
+  try { showView("flow"); } catch (_) {}
+  try { renderFlowPlan({ plan: flowPlan, segments: flowSegs }); } catch (_) {}
+
+  const status = $("#flow-status");
+  if (status) {
+    status.classList.remove("hidden");
+    if (state.applying) {
+      status.className = "ai-status err";
+      status.innerHTML = "⚠ Your last <b>Apply</b> was interrupted (Premiere may have closed). " +
+        "If your timeline looks half-rebuilt, press <b>Cmd+Z</b> in Premiere until it's back to how it " +
+        "was, then click <b>Apply cut &amp; reorder</b> again. Your arrangement below was restored.";
+    } else {
+      status.className = "ai-status";
+      status.textContent = "Restored your last arrangement — pick up where you left off. " +
+        "Click “Apply cut & reorder” when ready, or run Arrange again to redo it.";
+    }
+  }
+}
+
 setInterval(checkHelper, 5000);
 checkHelper();
+restoreFlowState();
 
 // ── One-time capability scan (dev diagnostic, silent) ─────────────
 // Unfiltered live method dump of the timeline-editing objects, POSTed to the
