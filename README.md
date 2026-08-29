@@ -1,7 +1,7 @@
 # FirstPass
 
 **Local AI editing for Adobe Premiere Pro.** It removes dead takes, filler words and
-silence — then reorders your story and adds the punch-ins.
+silence, then reorders your story and adds the punch-ins.
 
 Everything runs on your Mac. No account, no API key, no subscription, and your footage
 never leaves the machine.
@@ -23,13 +23,10 @@ CrisperWhisper, and a 14B language model via Ollama.
 
 | | |
 |---|---|
-| **Master** | One pass: cut repeated takes, filler words and silence together. Review before anything is applied. |
-| **AI Flow** | Rebuilds your timeline into a story — drops dead takes, groups topics, and **reorders it into an arc** with a hook, b-roll and pacing notes. Runs from Master's transcript, or transcribes by itself if you skip straight here. |
+| **Master** | Start here. One pass over repeated takes, filler words and silence together. Repeats keeps the good take, filler covers um, uh, you know, and silence uses smart dead-air detection with padding. Review before anything is applied. |
+| **AI Flow** | Rebuilds your timeline into a story. Drops dead takes, groups topics, and **reorders it into an arc** with a hook, b-roll and pacing notes. Runs from Master's transcript, or transcribes by itself if you skip straight here. |
 | **AI Motion** | Punch-ins on the lines that carry weight, holding to the end of the thought, written as **real Motion/Scale keyframes**. Most shots stay still. Makes its own transcript if you haven't run Master. |
-| **Repeats** | Finds re-spoken lines and keeps the good take. |
-| **Filler** | um, uh, you know, basically… — editable word list. |
-| **Silence** | Threshold + minimum duration, with padding and smart dead-air detection. |
-| **Format** | Resize a sequence to Reels/TikTok, YouTube, square — in place or as a copy. |
+| **Format** | Resize a sequence to Reels/TikTok, YouTube, or square. Click a size and it applies, in place or as a copy. |
 
 Every cut pass opens a word-level transcript first. Click any word to keep or cut it,
 and you see the estimated time saved before you commit.
@@ -40,11 +37,11 @@ and you see the estimated time saved before you commit.
 
 | | |
 |---|---|
-| **macOS** | Apple Silicon strongly recommended. Intel works but is slow — no Metal acceleration. |
-| **Premiere Pro** | 2026 (v25.6 or newer) — FirstPass uses the UXP editing API that older builds don't expose. |
+| **macOS** | Apple Silicon strongly recommended. Intel works but is slow, with no Metal acceleration. |
+| **Premiere Pro** | 2026 (v25.6 or newer). FirstPass uses the UXP editing API that older builds don't expose. |
 | **RAM** | 16 GB realistically. The 14B model wants ~10 GB while it's thinking. |
 | **Disk** | ~12 GB of one-time model downloads. |
-| **Everything else** | Nothing to prepare. Python and Ollama are installed for you if they're missing — no Homebrew and no admin password required. |
+| **Everything else** | Nothing to prepare. Python and Ollama are installed for you if they're missing, with no Homebrew and no admin password required. |
 
 Windows is not supported yet.
 
@@ -53,12 +50,12 @@ Windows is not supported yet.
 ## Installing
 
 Double-click **Install FirstPass.command**, or run `./scripts/install.sh` in a terminal.
-The first time, macOS may say it's from an unidentified developer — right-click the file
+The first time, macOS may say it's from an unidentified developer. Right-click the file
 and choose **Open** instead, and that prompt won't come back.
 
 It handles the whole local stack: Ollama and the language model, a Python virtualenv, the
 speech model, and a background helper that starts and stops with Premiere. If the Mac has
-no Python 3.10+ or no Ollama, both are fetched automatically — you don't need Homebrew,
+no Python 3.10+ or no Ollama, both are fetched automatically. You don't need Homebrew,
 and you won't be asked for a password. It's safe to re-run; every step is skipped if it's
 already done.
 
@@ -85,11 +82,11 @@ Double-click **Uninstall FirstPass.command**, or:
 
 It lists what it found and asks before deleting anything.
 
-Anything the installer had to fetch — Python, or Ollama itself — is removed too,
-but only if FirstPass was what installed it, and Ollama only if it holds no other
-models. If Ollama was already on the machine it's left alone; `brew uninstall
-ollama` if you want it gone. Removing the panel from UXP Developer Tool is
-manual; Adobe exposes no way to script it.
+Anything the installer had to fetch, Python or Ollama itself, is removed too, but only
+if FirstPass was what installed it, and Ollama only if it holds no other models. If
+Ollama was already on the machine it's left alone; `brew uninstall ollama` if you want
+it gone. Removing the panel from UXP Developer Tool is manual; Adobe exposes no way to
+script it.
 
 ---
 
@@ -98,10 +95,9 @@ manual; Adobe exposes no way to script it.
 **FirstPass edits your active sequence in place.** It does not create a copy by default.
 
 - `Cmd+Z` undoes any pass.
-- The Repeats and Silence tabs have a **Backup sequence first** toggle.
 - On anything you can't afford to lose, duplicate the sequence before you start.
 
-FirstPass reads **Video Track 1**. Media must be reachable from this machine — if your
+FirstPass reads **Video Track 1**. Media must be reachable from this machine, so if your
 footage lives on a NAS, mount it before analyzing.
 
 ---
@@ -116,7 +112,7 @@ and "this isn't for me yet":
   won't do anything sensible with music videos or dialogue scenes with overlapping speakers.
 - **Each clip is transcribed separately**, so a timeline of many distinct source files takes
   proportionally longer.
-- **AI Flow's pacing notes and continuity warnings are advisory** — they're shown for you to
+- **AI Flow's pacing notes and continuity warnings are advisory.** They're shown for you to
   act on, not applied automatically.
 - **The AI needs headroom.** On a 16 GB machine, quit Chrome before running AI Flow. Use
   **Free memory** in Settings to unload the model when you're done and want playback back.
@@ -144,7 +140,7 @@ Expected on Intel or on CPU. Apple Silicon uses Metal and is dramatically faster
 
 **Something else**
 Settings → **Copy diagnostics**, then open an issue and paste the result. It contains
-versions and hardware only — no filenames, footage paths or transcript text.
+versions and hardware only, with no filenames, footage paths or transcript text.
 
 ---
 
@@ -159,7 +155,7 @@ plugin/                        helper/server.py                 qwen2.5:14b-inst
 ```
 
 The panel never talks to the network beyond `localhost`. The only two outbound URLs in
-the codebase are `localhost:7742` and `localhost:11434` — everything else is on disk.
+the codebase are `localhost:7742` and `localhost:11434`. Everything else is on disk.
 Models are downloaded once, at install time.
 
 ```
@@ -182,5 +178,5 @@ firstpass/
 
 ## License
 
-[FSL-1.1-ALv2](LICENSE.md) — free to use, including on paid client work. You just can't
+[FSL-1.1-ALv2](LICENSE.md). Free to use, including on paid client work. You just can't
 repackage it as a competing product. Converts to Apache 2.0 two years after each release.
