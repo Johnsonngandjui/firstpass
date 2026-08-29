@@ -11,7 +11,7 @@ never leaves the machine.
 ```bash
 git clone https://github.com/Johnsonngandjui/firstpass.git
 cd firstpass
-./install.sh
+./scripts/install.sh
 ```
 
 ---
@@ -52,7 +52,7 @@ Windows is not supported yet.
 
 ## Installing
 
-Double-click **Install FirstPass.command**, or run `./install.sh` if you prefer a terminal.
+Double-click **Install FirstPass.command**, or run `./scripts/install.sh` in a terminal.
 The first time, macOS may say it's from an unidentified developer — right-click the file
 and choose **Open** instead, and that prompt won't come back.
 
@@ -79,8 +79,8 @@ The first install downloads roughly 12 GB of models. It's a one-time cost.
 Double-click **Uninstall FirstPass.command**, or:
 
 ```bash
-./uninstall.sh                 # everything, including the ~12 GB of models
-./uninstall.sh --keep-models   # keep the downloads, remove the rest
+./scripts/uninstall.sh                 # everything, including the ~12 GB of models
+./scripts/uninstall.sh --keep-models   # keep the downloads, remove the rest
 ```
 
 It lists what it found and asks before deleting anything.
@@ -164,7 +164,10 @@ Models are downloaded once, at install time.
 
 ```
 firstpass/
-├── install.sh
+├── Install FirstPass.command    ← double-clickable; runs scripts/install.sh
+├── scripts/
+│   ├── install.sh
+│   └── uninstall.sh
 ├── plugin/
 │   ├── manifest.json    ← UXP manifest
 │   ├── index.html       ← the panel UI (styles are inline)

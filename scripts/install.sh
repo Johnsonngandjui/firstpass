@@ -3,7 +3,9 @@
 # background watcher. Safe to re-run: every step is skipped if already done.
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# This script lives in scripts/, so HERE is its parent — the repo root that
+# every path below hangs off, including the one written into the LaunchAgent.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="$HERE/helper/firstpass-env"
 PLIST_SRC="$HERE/helper/com.firstpass.helper.plist.template"
 PLIST_DST="$HOME/Library/LaunchAgents/com.firstpass.helper.plist"

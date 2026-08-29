@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# FirstPass uninstaller — removes everything ./install.sh created: the watcher,
+# FirstPass uninstaller — removes everything the installer created: the watcher,
 # the virtualenv, the speech model and the language model. Safe to re-run.
 #
-#   ./uninstall.sh                 remove everything (asks first)
-#   ./uninstall.sh -y              don't ask
-#   ./uninstall.sh --keep-models   keep the ~12 GB of downloads, remove the rest
+#   scripts/uninstall.sh                 remove everything (asks first)
+#   scripts/uninstall.sh -y              don't ask
+#   scripts/uninstall.sh --keep-models   keep the ~12 GB of downloads, remove the rest
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# scripts/ is one level down; HERE is the repo root, which is what the venv and
+# the markers hang off, and what gets removed at the end.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="$HERE/helper/firstpass-env"
 PLIST="$HOME/Library/LaunchAgents/com.firstpass.helper.plist"
 AGENT="gui/$(id -u)/com.firstpass.helper"
@@ -51,7 +53,7 @@ size_of() { du -sh "$1" 2>/dev/null | awk '{print $1}'; }
 # ── What's actually here ────────────────────────────────────────────────────
 echo
 echo "${bold}FirstPass uninstaller${rst}"
-echo "${dim}This removes what install.sh created. Your footage and projects are untouched.${rst}"
+echo "${dim}This removes what the installer created. Your footage and projects are untouched.${rst}"
 
 step "Found"
 FOUND=""

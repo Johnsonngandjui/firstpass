@@ -4,7 +4,7 @@
 
 cd "$(dirname "$0")" || exit 1
 
-./uninstall.sh
+./scripts/uninstall.sh
 STATUS=$?
 
 echo

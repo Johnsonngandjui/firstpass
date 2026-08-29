@@ -2,7 +2,7 @@
 <!--
   FirstPass helper LaunchAgent (template).
 
-  install.sh substitutes __FIRSTPASS_DIR__ for the real repo path and writes the
+  scripts/install.sh substitutes __FIRSTPASS_DIR__ for the real repo path and writes the
   result to ~/Library/LaunchAgents/com.firstpass.helper.plist.
 
   This starts premiere-watch.sh at login. The watcher is idle-cheap: it polls

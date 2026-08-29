@@ -53,7 +53,7 @@ start_server() {
   # already up, or still booting (process exists but health not ready) → don't double-start
   server_up && return 0
   pgrep -f "$SERVER_TAG" >/dev/null 2>&1 && return 0
-  [ -x "$PY" ] || { echo "[$(date '+%F %T')] missing venv at $PY — run ./install.sh" >>"$LOG"; return 1; }
+  [ -x "$PY" ] || { echo "[$(date '+%F %T')] missing venv at $PY — run Install FirstPass.command" >>"$LOG"; return 1; }
   cd "$WORKDIR" || return 1
   rotate_log
   echo "[$(date '+%F %T')] Premiere open → starting helper" >>"$LOG"

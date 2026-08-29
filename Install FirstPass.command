@@ -7,7 +7,7 @@
 
 cd "$(dirname "$0")" || exit 1
 
-./install.sh
+./scripts/install.sh
 STATUS=$?
 
 echo
