@@ -10,7 +10,7 @@ never leaves the machine.
 <!-- ![FirstPass demo](docs/demo.gif) -->
 
 ```bash
-git clone https://github.com/<you>/firstpass.git
+git clone https://github.com/Johnsonngandjui/firstpass.git
 cd firstpass
 ./install.sh
 ```
@@ -59,10 +59,11 @@ It's safe to re-run — every step is skipped if it's already done.
 
 Then load the panel by hand (Adobe requires this):
 
-1. Install **UXP Developer Tool** from Creative Cloud Desktop
-2. UXP Developer Tool → **Add Plugin** → select `plugin/manifest.json`
-3. Click **Load**
-4. In Premiere: **Window → UXP Plugins → FirstPass**
+1. **Open Premiere Pro first**
+2. Install **UXP Developer Tool** from Creative Cloud Desktop
+3. UXP Developer Tool → **Add Plugin** → select `plugin/manifest.json`
+4. Click **Load**
+5. In Premiere: **Window → UXP Plugins → FirstPass**
 
 The first install downloads roughly 12 GB of models. It's a one-time cost.
 

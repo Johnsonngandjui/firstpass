@@ -102,7 +102,9 @@ curl -s --max-time 2 http://localhost:11434/api/version >/dev/null 2>&1 \
   || die "Ollama won't start. Open the Ollama app once manually, then re-run."
 ok "Ollama running"
 
-if ollama list 2>/dev/null | grep -q "${OLLAMA_MODEL%%:*}"; then
+# Match the full name:tag — matching just "qwen2.5" would accept some other
+# variant (7b, base) and silently skip the pull that AI Flow actually needs.
+if ollama list 2>/dev/null | grep -qF "$OLLAMA_MODEL"; then
   ok "Model $OLLAMA_MODEL already downloaded"
 else
   echo "  Downloading $OLLAMA_MODEL — about 9 GB, this is the long part."
@@ -177,21 +179,59 @@ fi
 sed "s|__FIRSTPASS_DIR__|$HERE|g" "$PLIST_SRC" > "$PLIST_DST"
 chmod +x "$HERE/helper/premiere-watch.sh"
 
-launchctl bootout "gui/$(id -u)/com.firstpass.helper" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$PLIST_DST" 2>/dev/null \
-  || launchctl load "$PLIST_DST" 2>/dev/null \
-  || warn "Could not register the LaunchAgent — you can start the helper manually with:
+AGENT="gui/$(id -u)/com.firstpass.helper"
+agent_registered() { launchctl print "$AGENT" >/dev/null 2>&1; }
+
+launchctl bootout "$AGENT" 2>/dev/null || true
+# bootout is asynchronous. Bootstrapping while the old job is still unloading
+# fails with "Input/output error", so wait for it to actually go away.
+for _ in $(seq 1 15); do
+  agent_registered || break
+  sleep 1
+done
+
+# Keep the error: bootstrap's failure reason is the only useful thing to show a
+# user whose install silently produced no watcher.
+BOOT_ERR="$(launchctl bootstrap "gui/$(id -u)" "$PLIST_DST" 2>&1)" || true
+
+# Trust the registry, not the exit code — the legacy `launchctl load` returns 0
+# even when it registers nothing.
+if ! agent_registered; then
+  launchctl load "$PLIST_DST" 2>/dev/null || true
+fi
+
+if agent_registered; then
+  ok "Helper will start automatically whenever Premiere is open"
+else
+  warn "Could not register the LaunchAgent${BOOT_ERR:+ — $BOOT_ERR}
+      You can still start the helper by hand with:
       $VENV/bin/python3 $HERE/helper/server.py"
-ok "Helper will start automatically whenever Premiere is open"
+fi
 
 # ── 6. Verify ───────────────────────────────────────────────────────────────
 step "Verifying"
+
+if agent_registered; then
+  ok "Background watcher registered"
+else
+  warn "Background watcher is NOT registered — the helper will not start on its own"
+fi
+
+# Booting out the old watcher above makes it stop its server, which takes a
+# moment. Without this pause the probe below can be answered by that dying
+# server and report a healthy install that has nothing left running.
+sleep 3
 
 # The watcher only starts the server while Premiere is running, so for this
 # check we start it ourselves and shut it down after.
 STARTED_FOR_CHECK=""
 if ! curl -s --max-time 2 http://localhost:7742/health >/dev/null 2>&1; then
-  ( cd "$HERE/helper" && "$VENV/bin/python3" server.py >/dev/null 2>&1 & )
+  # Pass server.py by absolute path, matching how premiere-watch.sh launches it:
+  # the venv python is a symlink, so the process shows the RESOLVED interpreter
+  # and the script path is the only stable thing to match on. A bare "server.py"
+  # here would leave both the pkill below and the watcher's stop_server unable to
+  # find it — a server that never shuts down when Premiere closes.
+  ( cd "$HERE/helper" && "$VENV/bin/python3" "$HERE/helper/server.py" >/dev/null 2>&1 & )
   STARTED_FOR_CHECK=1
   for _ in $(seq 1 45); do
     curl -s --max-time 2 http://localhost:7742/health >/dev/null 2>&1 && break
@@ -220,9 +260,10 @@ ${grn}${bold}Installed.${rst}
 
 ${bold}One manual step left${rst} — Adobe requires plugins be loaded by hand:
 
-  1. Open Creative Cloud Desktop and install ${bold}UXP Developer Tool${rst} if you don't have it
-  2. Open UXP Developer Tool → ${bold}Add Plugin${rst}
-  3. Select:  ${dim}$HERE/plugin/manifest.json${rst}
+  1. ${bold}Open Premiere Pro first${rst}
+  2. Install ${bold}UXP Developer Tool${rst} from Creative Cloud Desktop if you don't have it
+  3. UXP Developer Tool → ${bold}Add Plugin${rst} → select:
+     ${dim}$HERE/plugin/manifest.json${rst}
   4. Click ${bold}Load${rst}
   5. In Premiere:  Window → UXP Plugins → ${bold}FirstPass${rst}
 
