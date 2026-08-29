@@ -730,7 +730,7 @@ body {
     <!-- ══ LEFT SIDEBAR ══════════════════════════════════════════ -->
     <aside class="sidebar">
       <nav class="nav" id="nav">
-        <div class="nav-item active" data-view="master" title="Master — clean up everything in one pass" role="button" tabindex="0">
+        <div class="nav-item active" data-view="master" title="Master: clean up everything in one pass" role="button" tabindex="0">
           <span class="nav-ico">
             <svg viewBox="0 0 24 24" class="filled">
               <rect x="2" y="5" width="20" height="2.6" rx="1.3"/>
@@ -742,7 +742,7 @@ body {
           <span class="nav-txt">Master</span>
         </div>
 
-        <div class="nav-item" data-view="flow" title="AI Flow — rebuild the story" role="button" tabindex="0">
+        <div class="nav-item" data-view="flow" title="AI Flow: rebuild the story" role="button" tabindex="0">
           <span class="nav-ico">
             <svg viewBox="0 0 24 24" class="filled">
               <path d="M12 2l1.7 5.1L19 8.8l-5.3 1.7L12 16l-1.7-5.5L5 8.8l5.3-1.7z"/>
@@ -752,7 +752,7 @@ body {
           <span class="nav-txt">AI Flow</span>
         </div>
 
-        <div class="nav-item" data-view="edit" title="AI Camera — punch-ins &amp; holds that follow your words" role="button" tabindex="0">
+        <div class="nav-item" data-view="edit" title="AI Camera: punch-ins and holds that follow your words" role="button" tabindex="0">
           <span class="nav-ico">
             <svg viewBox="0 0 24 24" class="stroked" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <rect x="2" y="6" width="13" height="12" rx="2.5"/>
@@ -831,7 +831,7 @@ body {
           </div>
 
           <div class="switch-row">
-            <span class="sw-label">Smart dead-air <span class="info-ico" title="Cuts anywhere no one is talking — not just quiet spots. It listens to the words, so it still catches pauses over music or background noise, and never cuts a soft-spoken voice. Slower (it transcribes). Off = fast, plain volume threshold.">i</span></span>
+            <span class="sw-label">Smart dead-air <span class="info-ico" title="Cuts anywhere no one is talking, not just quiet spots. It listens to the words, so it still catches pauses over music or background noise, and never cuts a soft-spoken voice. Slower (it transcribes). Off = fast, plain volume threshold.">i</span></span>
             <div class="switch on" role="button" aria-pressed="true" id="sw-smart-silence" tabindex="0"><span class="knob"></span></div>
           </div>
           <div class="switch-row">
@@ -957,7 +957,7 @@ body {
       <section class="view active" data-view="master">
         <header class="view-head">
           <h1>Master Cleanup</h1>
-          <p>Removes repeats, fillers, and silence in a single pass — the safe way to combine them.</p>
+          <p>Removes repeats, fillers, and silence in one pass. Start here.</p>
         </header>
         <div class="card">
           <div class="switch-row"><span class="sw-label">Remove repeated takes</span><div class="switch on" role="button" aria-pressed="true" id="m-repeats" tabindex="0"><span class="knob"></span></div></div>
@@ -969,6 +969,8 @@ body {
           <span class="flex-spacer"></span>
           <div class="btn primary" data-analyze="master" role="button" tabindex="0">Run full cleanup</div>
         </div>
+
+        <p class="hint-note">Next: <b>AI Flow</b> to rearrange the story, <b>AI Camera</b> to add movement.</p>
 
         <p class="hint-note" style="margin-top:20px;">Done with the AI passes? Free the local model from memory so Premiere plays back smoothly. It reloads automatically next time you run AI Flow.</p>
         <div class="action-bar">
@@ -982,10 +984,10 @@ body {
       <section class="view" data-view="flow">
         <header class="view-head">
           <h1>AI Flow</h1>
-          <p>Rebuilds your timeline into a story — drops dead takes, groups what's left by topic, and reorders it into an arc with a hook. Reviewed before anything moves.</p>
+          <p>Rebuilds your timeline into a story. Drops dead takes, groups what's left by topic, and reorders it into an arc with a hook.</p>
         </header>
 
-        <p class="hint-note">Transcribes first if needed. Runs locally — nothing uploaded. Review before anything moves.</p>
+        <p class="hint-note">Works best after Master. Runs locally, nothing uploaded. Review before anything moves.</p>
 
         <div class="action-bar">
           <span class="flex-spacer"></span>
@@ -1000,10 +1002,10 @@ body {
       <section class="view" data-view="edit">
         <header class="view-head">
           <h1>AI Camera</h1>
-          <p>One camera in, coverage out. Reads what you're saying, punches in on the lines that carry weight, holds to the end of the thought, and cuts back wide — so a single static take feels like a multi-cam shoot.</p>
+          <p>One camera in, coverage out. Punches in on the lines that carry weight, holds to the end of the thought, then cuts back wide, so a static take feels like a multi-cam shoot.</p>
         </header>
 
-        <p class="hint-note">Transcribes first if needed. Runs locally — nothing uploaded. Review before any keyframes. <span style="opacity:.7;">(Cmd+Z undoes.)</span></p>
+        <p class="hint-note">Works best after Master. Runs locally, nothing uploaded. Review before any keyframes. <span style="opacity:.7;">(Cmd+Z undoes.)</span></p>
 
         <div class="action-bar">
           <span class="flex-spacer"></span>
@@ -1032,7 +1034,7 @@ body {
             <span class="sw-label">Report a problem</span>
             <div class="btn secondary" role="button" tabindex="0" id="diag-copy">Copy diagnostics</div>
           </div>
-          <p style="font-size:11px;color:var(--text-dim);margin:-4px 0 2px;">Copies your versions, hardware and most recent error to the clipboard. Paste it into a GitHub issue so the problem can be reproduced — it contains no footage, filenames or transcript text.</p>
+          <p style="font-size:11px;color:var(--text-dim);margin:-4px 0 2px;">Copies your versions, hardware and most recent error to the clipboard. Paste it into a GitHub issue so the problem can be reproduced. It contains no footage, filenames or transcript text.</p>
           <pre id="diag-out" style="font-family:ui-monospace,Menlo,monospace;font-size:10px;line-height:1.5;color:var(--text-dim);background:var(--bg);border:1px solid var(--border-2);border-radius:8px;padding:10px;max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0;">Tap Copy diagnostics.</pre>
         </div>
       </section>
