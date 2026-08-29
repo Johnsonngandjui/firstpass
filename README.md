@@ -25,7 +25,7 @@ CrisperWhisper, and a 14B language model via Ollama.
 |---|---|
 | **Master** | One pass: cut repeated takes, filler words and silence together. Review before anything is applied. |
 | **AI Flow** | Rebuilds your timeline into a story — drops dead takes, groups topics, and **reorders it into an arc** with a hook, b-roll and pacing notes. Runs from Master's transcript, or transcribes by itself if you skip straight here. |
-| **AI Camera** | One camera in, coverage out: punch-ins on the lines that carry weight, holds to the end of the thought, back out wide — written as **real Motion/Scale keyframes**. Makes its own transcript if you haven't run Master. |
+| **AI Motion** | Punch-ins on the lines that carry weight, holding to the end of the thought, written as **real Motion/Scale keyframes**. Most shots stay still. Makes its own transcript if you haven't run Master. |
 | **Repeats** | Finds re-spoken lines and keeps the good take. |
 | **Filler** | um, uh, you know, basically… — editable word list. |
 | **Silence** | Threshold + minimum duration, with padding and smart dead-air detection. |
@@ -119,7 +119,7 @@ and "this isn't for me yet":
 - **AI Flow's pacing notes and continuity warnings are advisory** — they're shown for you to
   act on, not applied automatically.
 - **The AI needs headroom.** On a 16 GB machine, quit Chrome before running AI Flow. Use
-  **Free memory** on the Master tab to unload the model when you're done and want playback back.
+  **Free memory** in Settings to unload the model when you're done and want playback back.
 - Transcription quality sets the ceiling. Heavy accents, cross-talk or bad audio degrade
   every downstream pass.
 
@@ -174,7 +174,7 @@ firstpass/
 │   └── main.js          ← Premiere API wiring + helper calls
 └── helper/
     ├── server.py        ← FastAPI: transcription, silence/filler/repeat detection
-    ├── ai_flow.py       ← story + cinematography planning prompts
+    ├── ai_flow.py       ← story + motion planning prompts
     └── premiere-watch.sh ← starts/stops the helper with Premiere
 ```
 

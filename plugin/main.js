@@ -1661,7 +1661,7 @@ function keptWords() {
 }
 const segById = (id) => (flowSegs || []).find(s => s.id === id);
 
-// Flow and Camera work from Master's transcript, but they shouldn't strand
+// Flow and Motion work from Master's transcript, but they shouldn't strand
 // someone who came straight here. Transcription touches nothing on the
 // timeline, so when there's no transcript yet we simply make one and carry on
 // — a transcribe-only analyze per source: no cuts detected, nothing applied.
@@ -1878,7 +1878,7 @@ async function freeModels() {
 const freeMemBtn = $("#free-mem");
 if (freeMemBtn) freeMemBtn.addEventListener("click", () => withBusy(freeMemBtn, "Freeing…", freeModels));
 
-// ── AI Camera: keyframe engine (emphasis scale zoom) ─────────────
+// ── AI Motion: keyframe engine (emphasis scale zoom) ─────────────
 // ADBE Motion, Scale = param index 1 (probed). We keyframe it. The exact
 // add-keyframe call shape is the last unknown, so we try several shapes and
 // record which worked / the errors, with phase tracking.
@@ -1925,7 +1925,7 @@ async function emphasisZoom(clip, atSec, opts = {}) {
 
     P.v = "enable time-varying";
     await project.lockedAccess(() => {
-      project.executeTransaction((c) => { c.addAction(scale.createSetTimeVaryingAction(true)); }, "AI Camera: enable Scale keyframes");
+      project.executeTransaction((c) => { c.addAction(scale.createSetTimeVaryingAction(true)); }, "AI Motion: enable Scale keyframes");
     });
 
     const kfs = [[atSec - ramp, 100], [atSec, peak], [atSec + hold, peak], [atSec + hold + ramp, 100]];
@@ -1937,7 +1937,7 @@ async function emphasisZoom(clip, atSec, opts = {}) {
           const s = addScaleKeyframeAction(c, scale, mkTT(Math.max(0, t)), v, errs);
           if (s >= 0) usedShape = s;
         }
-      }, "AI Camera: scale punch-in");
+      }, "AI Motion: scale punch-in");
     });
     if (usedShape < 0) { lastZoomError = "no keyframe shape worked → " + errs.map((m, i) => `[${i}] ${m}`).filter(Boolean).join(" | "); return { ok: false, error: lastZoomError }; }
     return { ok: true, shape: usedShape };
@@ -1948,7 +1948,7 @@ async function emphasisZoom(clip, atSec, opts = {}) {
 }
 
 
-// Generic scale-keyframe writer (used by AI Camera moves). kfList: [[timelineSec, scale%]].
+// Generic scale-keyframe writer (used by AI Motion moves). kfList: [[timelineSec, scale%]].
 async function applyScaleKeyframes(clip, kfList) {
   if (!kfList.length) return { ok: true, skipped: true };
   const project = await ppro.Project.getActiveProject();
@@ -1958,16 +1958,16 @@ async function applyScaleKeyframes(clip, kfList) {
   // Clear any stale keyframes (repeated tests leave them, which stack/interfere):
   // toggling time-varying off then on resets the param, then we add fresh.
   await project.lockedAccess(() => {
-    project.executeTransaction((c) => { try { c.addAction(scale.createSetTimeVaryingAction(false)); } catch (_) {} }, "AI Camera: clear keyframes");
+    project.executeTransaction((c) => { try { c.addAction(scale.createSetTimeVaryingAction(false)); } catch (_) {} }, "AI Motion: clear keyframes");
   });
   await project.lockedAccess(() => {
-    project.executeTransaction((c) => { c.addAction(scale.createSetTimeVaryingAction(true)); }, "AI Camera: enable keyframes");
+    project.executeTransaction((c) => { c.addAction(scale.createSetTimeVaryingAction(true)); }, "AI Motion: enable keyframes");
   });
   const errs = []; let used = -1;
   await project.lockedAccess(() => {
     project.executeTransaction((c) => {
       for (const [t, v] of kfList) { const s = addScaleKeyframeAction(c, scale, mkTT(Math.max(0, t)), v, errs); if (s >= 0) used = s; }
-    }, "AI Camera: keyframes");
+    }, "AI Motion: keyframes");
   });
   if (used < 0) return { ok: false, error: "kf failed → " + errs.filter(Boolean).join(" | ") };
   // Read back actual VALUES at each keyframe time → proves the scale animates.
@@ -2085,7 +2085,7 @@ async function resetClipTo100(clip, srcIn, dur) {
   await applyScaleKeyframes(clip, [[srcIn + 0.02, 100], [srcIn + Math.max(0.1, dur - 0.02), 100]]);  // flatten to 100
   const project = await ppro.Project.getActiveProject();
   await project.lockedAccess(() => {
-    project.executeTransaction((c) => { try { c.addAction(scale.createSetTimeVaryingAction(false)); } catch (_) {} }, "AI Camera: static reset");
+    project.executeTransaction((c) => { try { c.addAction(scale.createSetTimeVaryingAction(false)); } catch (_) {} }, "AI Motion: static reset");
   });
   return true;
 }
@@ -2101,7 +2101,7 @@ async function planEdit() {
   const shots = await gatherShots(sequence);
   if (!shots.length) throw new Error("No clips on the timeline.");
   editShots = shots;
-  st.textContent = "Planning your camera moves… a moment.";
+  st.textContent = "Planning your moves… a moment.";
   $("#edit-result").classList.add("hidden");
 
   let resp;
@@ -2111,7 +2111,7 @@ async function planEdit() {
       body: JSON.stringify({ shots: shots.map(s => ({ i: s.i, seconds: s.seconds, text: s.text })) })
     });
   } catch (e) { throw new Error("Helper not reachable — is the server running?"); }
-  if (!resp.ok) { const e = await resp.json().catch(() => ({})); st.className = "ai-status err"; st.textContent = e.detail || "AI Camera failed — check the local model in Settings."; return; }
+  if (!resp.ok) { const e = await resp.json().catch(() => ({})); st.className = "ai-status err"; st.textContent = e.detail || "AI Motion failed — check the local model in Settings."; return; }
   editPlan = await resp.json();
   st.classList.add("hidden");
   renderEditPlan();
@@ -2122,7 +2122,7 @@ function renderEditPlan() {
   const shotById = {}; for (const s of editShots) shotById[s.i] = s;
   const moves = (editPlan.shots || []);
   const active = moves.filter(m => m.move !== "static").length;
-  const P = [`<div class="flow-sec-title">Camera moves · ${active} of ${moves.length} shots</div>`];
+  const P = [`<div class="flow-sec-title">Moves · ${active} of ${moves.length} shots</div>`];
   for (const m of moves) {
     const s = shotById[m.i]; if (!s) continue;
     const isStatic = m.move === "static";
@@ -2145,7 +2145,7 @@ function renderEditPlan() {
 
 async function applyEditPlan() {
   if (!editPlan || !editShots) throw new Error("Plan first.");
-  overlayShow("Adding camera moves");
+  overlayShow("Adding moves");
   const moves = editPlan.shots || [];
   const withMotion = moves.filter(m => m.move !== "static");
   let done = 0, applied = 0, failed = "", verify = null;
@@ -2188,7 +2188,7 @@ async function applyEditPlan() {
     st.className = "ai-status err";
     st.textContent = "No moves applied" + (failed ? " — " + failed : ".");
   }
-  if (applied) toast(`Added ${applied} camera move${applied === 1 ? "" : "s"}. (Cmd+Z to undo.)`);
+  if (applied) toast(`Added ${applied} move${applied === 1 ? "" : "s"}. (Cmd+Z to undo.)`);
 }
 
 const editPlanBtn = $("#edit-plan");
@@ -2224,7 +2224,7 @@ async function saveFlowState(patch) {
       v: 1, kind: "flow", savedAt: Date.now(),
       plan: flowPlan, segs: flowSegs, cuts: allCuts, durs: mediaDurations,
       // The transcript is the expensive part — persisting it means AI Flow and
-      // AI Camera still work after a panel or Premiere restart.
+      // AI Motion still work after a panel or Premiere restart.
       words: allWords,
       ...(patch || {})
     });
@@ -2246,7 +2246,7 @@ async function restoreFlowState() {
   if (!state) return;
 
   // Phase 1: the transcript alone — restored even when no plan was saved, so
-  // AI Flow / AI Camera work after a restart without re-running Master.
+  // AI Flow / AI Motion work after a restart without re-running Master.
   if (Array.isArray(state.words) && state.words.length && !allWords.length) {
     allWords = state.words;
     if (Array.isArray(state.cuts)) allCuts = state.cuts;

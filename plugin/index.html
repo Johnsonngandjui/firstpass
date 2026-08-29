@@ -752,14 +752,16 @@ body {
           <span class="nav-txt">AI Flow</span>
         </div>
 
-        <div class="nav-item" data-view="edit" title="AI Camera: punch-ins and holds that follow your words" role="button" tabindex="0">
+        <div class="nav-item" data-view="edit" title="AI Motion: punch-ins and holds that follow your words" role="button" tabindex="0">
           <span class="nav-ico">
             <svg viewBox="0 0 24 24" class="stroked" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="2" y="6" width="13" height="12" rx="2.5"/>
-              <path d="M15 10.5l6-3.5v10l-6-3.5z"/>
+              <path d="M4 9V6.5A2.5 2.5 0 0 1 6.5 4H9"/>
+              <path d="M15 4h2.5A2.5 2.5 0 0 1 20 6.5V9"/>
+              <path d="M20 15v2.5a2.5 2.5 0 0 1-2.5 2.5H15"/>
+              <path d="M9 20H6.5A2.5 2.5 0 0 1 4 17.5V15"/>
             </svg>
           </span>
-          <span class="nav-txt">Camera</span>
+          <span class="nav-txt">Motion</span>
         </div>
 
         <!-- The repeats/filler/silence views still exist below (unreachable —
@@ -970,7 +972,7 @@ body {
           <div class="btn primary" data-analyze="master" role="button" tabindex="0">Run full cleanup</div>
         </div>
 
-        <p class="hint-note">Next: <b>AI Flow</b> to rearrange the story, <b>AI Camera</b> to add movement.</p>
+        <p class="hint-note">Next: <b>AI Flow</b> to rearrange the story, <b>AI Motion</b> to add movement.</p>
       </section>
 
       <!-- ── AI Flow ────────────────────────────────────────── -->
@@ -991,18 +993,18 @@ body {
         <div id="flow-result" class="hidden"></div>
       </section>
 
-      <!-- ── AI Camera ──────────────────────────────────────── -->
+      <!-- ── AI Motion ──────────────────────────────────────── -->
       <section class="view" data-view="edit">
         <header class="view-head">
-          <h1>AI Camera</h1>
-          <p>One camera in, coverage out. Punches in on the lines that carry weight, holds to the end of the thought, then cuts back wide, so a static take feels like a multi-cam shoot.</p>
+          <h1>AI Motion</h1>
+          <p>Punches in on the lines that carry weight and holds to the end of the thought. Most shots stay still, so the moves that land mean something.</p>
         </header>
 
         <p class="hint-note">Works best after Master. Runs locally, nothing uploaded. Review before any keyframes. <span style="opacity:.7;">(Cmd+Z undoes.)</span></p>
 
         <div class="action-bar">
           <span class="flex-spacer"></span>
-          <div class="btn primary" id="edit-plan" role="button" tabindex="0">Plan camera moves</div>
+          <div class="btn primary" id="edit-plan" role="button" tabindex="0">Plan moves</div>
         </div>
 
         <div id="edit-status" class="ai-status hidden"></div>
@@ -1029,7 +1031,7 @@ body {
             <span class="sw-label">Local AI model</span>
             <div class="btn secondary" id="free-mem" role="button" tabindex="0">Free memory</div>
           </div>
-          <p style="font-size:11px;color:var(--text-dim);margin:-4px 0 2px;">The model stays in memory for a few minutes after an AI pass. Free it now if playback feels heavy. It reloads by itself next time you run AI Flow or AI Camera.</p>
+          <p style="font-size:11px;color:var(--text-dim);margin:-4px 0 2px;">The model stays in memory for a few minutes after an AI pass. Free it now if playback feels heavy. It reloads by itself next time you run AI Flow or AI Motion.</p>
           <span id="free-mem-status" style="font-size:11.5px;color:var(--text-dim);"></span>
         </div>
 
