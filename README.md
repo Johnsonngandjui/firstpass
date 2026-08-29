@@ -24,8 +24,8 @@ CrisperWhisper, and a 14B language model via Ollama.
 | | |
 |---|---|
 | **Master** | One pass: cut repeated takes, filler words and silence together. Review before anything is applied. |
-| **AI Flow** | Reads every clip's transcript, drops dead takes, groups topics, and **reorders your timeline** into a story arc. Suggests a hook, b-roll and pacing. |
-| **AI Edit** | Plans a camera move per shot — pushes, punch-ins, holds — and writes **real Motion/Scale keyframes**. |
+| **AI Flow** | Rebuilds your timeline into a story — drops dead takes, groups topics, and **reorders it into an arc** with a hook, b-roll and pacing notes. Runs from Master's transcript, so run Master first. |
+| **AI Camera** | One camera in, coverage out: punch-ins on the lines that carry weight, holds to the end of the thought, back out wide — written as **real Motion/Scale keyframes**. Also needs Master's transcript. |
 | **Repeats** | Finds re-spoken lines and keeps the good take. |
 | **Filler** | um, uh, you know, basically… — editable word list. |
 | **Silence** | Threshold + minimum duration, with padding and smart dead-air detection. |

@@ -308,7 +308,7 @@ def _validate_plan(plan: dict, segments: list[dict]) -> dict:
     return plan
 
 
-# ── AI Edit: cinematography (per-shot camera move) ──────────────────────────
+# ── AI Camera: per-shot camera move planning ────────────────────────────────
 _EDIT_SYSTEM = (
     "You are a cinematographer for short-form talking-head video. You are given "
     "the ordered SHOTS of an edit — each shot is one continuous clip with its "

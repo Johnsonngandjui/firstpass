@@ -742,7 +742,7 @@ body {
           <span class="nav-txt">Master</span>
         </div>
 
-        <div class="nav-item" data-view="flow" title="AI Flow — reorder, b-roll & pacing" role="button" tabindex="0">
+        <div class="nav-item" data-view="flow" title="AI Flow — rebuild the story (run Master first)" role="button" tabindex="0">
           <span class="nav-ico">
             <svg viewBox="0 0 24 24" class="filled">
               <path d="M12 2l1.7 5.1L19 8.8l-5.3 1.7L12 16l-1.7-5.5L5 8.8l5.3-1.7z"/>
@@ -752,13 +752,13 @@ body {
           <span class="nav-txt">AI Flow</span>
         </div>
 
-        <div class="nav-item" data-view="edit" title="AI Edit — emphasis zooms, pacing, b-roll space" role="button" tabindex="0">
+        <div class="nav-item" data-view="edit" title="AI Camera — punch-ins &amp; holds that follow your words (run Master first)" role="button" tabindex="0">
           <span class="nav-ico">
             <svg viewBox="0 0 24 24" class="stroked" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M3 12h4l2-6 4 14 3-9 2 3h3"/>
             </svg>
           </span>
-          <span class="nav-txt">AI Edit</span>
+          <span class="nav-txt">Camera</span>
         </div>
 
         <!-- The repeats/filler/silence views still exist below (unreachable —
@@ -981,10 +981,10 @@ body {
       <section class="view" data-view="flow">
         <header class="view-head">
           <h1>AI Flow</h1>
-          <p>Removes repeated takes, then groups what's left by topic and arranges it into a story that's easy to follow — reviewed before anything moves.</p>
+          <p>Rebuilds your timeline into a story — drops dead takes, groups what's left by topic, and reorders it into an arc with a hook. Reviewed before anything moves.</p>
         </header>
 
-        <p class="hint-note">Uses the transcript from your last <b>Master</b> (or analysis). Runs a local model on your Mac — no cloud, no cost. A long clip may take a minute.</p>
+        <p class="hint-note"><b>Step 2 — run Master first.</b> Flow works from the transcript Master produces; without it there's nothing to arrange. Local model, nothing uploaded. A long clip can take a minute.</p>
 
         <div class="action-bar">
           <span class="flex-spacer"></span>
@@ -995,18 +995,18 @@ body {
         <div id="flow-result" class="hidden"></div>
       </section>
 
-      <!-- ── AI Edit ────────────────────────────────────────── -->
+      <!-- ── AI Camera ──────────────────────────────────────── -->
       <section class="view" data-view="edit">
         <header class="view-head">
-          <h1>AI Edit</h1>
-          <p>Emphasis zooms on key moments, pacing, and space for b-roll — motion that keeps viewers watching.</p>
+          <h1>AI Camera</h1>
+          <p>One camera in, coverage out. Reads what you're saying, punches in on the lines that carry weight, holds to the end of the thought, and cuts back wide — so a single static take feels like a multi-cam shoot.</p>
         </header>
 
-        <p class="hint-note">Reads your timeline shots (needs a prior <b>Master</b>/analysis for the words) and picks a subtle camera move per shot — mostly static, with pushes, punch-ins and holds where they earn it. Reviewed before applying. <span style="opacity:.7;">(Undo with Cmd+Z.)</span></p>
+        <p class="hint-note"><b>Step 2 — run Master first.</b> The camera follows your words, so it needs the transcript Master produces. Every move is shown for review before a single keyframe is written, and it's all real Motion/Scale keyframes. <span style="opacity:.7;">(Undo with Cmd+Z.)</span></p>
 
         <div class="action-bar">
           <span class="flex-spacer"></span>
-          <div class="btn primary" id="edit-plan" role="button" tabindex="0">Plan cinematography</div>
+          <div class="btn primary" id="edit-plan" role="button" tabindex="0">Plan camera moves</div>
         </div>
 
         <div id="edit-status" class="ai-status hidden"></div>
