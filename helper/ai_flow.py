@@ -6,7 +6,7 @@ returns a structured edit *plan*. It never touches the timeline itself — the U
 panel reviews the plan and decides what to apply.
 
 The LLM call is behind a single swappable function `_chat()`. Today it targets a
-local Ollama model; swapping to Claude later means changing only `_chat()`.
+local Ollama model; swapping to a hosted API later means changing only `_chat()`.
 """
 
 import json
