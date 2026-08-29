@@ -1,7 +1,5 @@
 # Python virtual environment (~1 GB — recreated by ./install.sh)
 helper/firstpass-env/
-# pre-rename venv; kept ignored so an existing checkout doesn't try to commit it
-helper/clipcutter-env/
 
 # Python caches
 __pycache__/
@@ -15,12 +13,12 @@ __pycache__/
 
 # Diagnostics dumps written by Settings → Copy diagnostics
 helper/firstpass_debug.json
-helper/clipcutter_debug.json
 
 # Crash-resume state
 helper/firstpass_state.json
 
-# Packaged plugin artifacts (attached to GitHub Releases, not committed)
+# Packaged plugin artifacts. The panel is loaded via UXP Developer Tool, so
+# nothing here ships one — this just keeps a local build from being committed.
 *.ccx
 
 # macOS
