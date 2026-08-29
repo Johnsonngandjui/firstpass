@@ -142,9 +142,24 @@ function selectedFillers() {
 }
 
 // ── Format radio cards ───────────────────────────────────────────
-$$("#fmt-list .fmt").forEach(card => card.addEventListener("click", () => {
+// Clicking a size IS the action — it selects and applies in one step (there
+// is no separate Apply button). Mirrors withBusy's re-entry guard and error
+// toast; applyFormat toasts its own success and refreshes the readout.
+let fmtApplying = false;
+$$("#fmt-list .fmt").forEach(card => card.addEventListener("click", async () => {
+  if (fmtApplying) return;
   $$("#fmt-list .fmt").forEach(c => c.classList.remove("active"));
   card.classList.add("active");
+  fmtApplying = true;
+  card.classList.add("is-busy");
+  try {
+    await applyFormat();
+  } catch (err) {
+    toast(err && err.message ? err.message : String(err), true);
+  } finally {
+    fmtApplying = false;
+    card.classList.remove("is-busy");
+  }
 }));
 function selectedFormat() {
   const a = $("#fmt-list .fmt.active");
@@ -2304,38 +2319,3 @@ if (diagCopyBtn) diagCopyBtn.addEventListener("click", () => withBusy(diagCopyBt
   else            toast("Couldn't copy. Screenshot the text above instead.", true);
 }));
 
-// ── TEMPORARY: audio-export probe ─────────────────────────────────────────
-// Premiere 26's UXP registry (embedded in the app binary) exposes
-//   EncoderManager.exportSequence(sequence, exportType, outputFile, presetFile, exportFull)
-// If this works, analysis can hand the helper a ~30 MB WAV instead of making
-// ffmpeg decode a multi-gigabyte video, and a future hosted mode could upload
-// audio only — never footage. Premiere even ships WAV_Mono_16bit_16kHz.epr,
-// which is already the format the speech model wants.
-// Remove this card once the export fast path has proven out in the field.
-// (The analyze pipeline now uses WAV_PRESETS, defined with prerenderSourceAudio.)
-const audioProbeBtn = $("#audio-probe");
-if (audioProbeBtn) audioProbeBtn.addEventListener("click", () => withBusy(audioProbeBtn, "Testing…", async () => {
-  const out = $("#audio-probe-out");
-  const log = (s) => { if (out) out.textContent += s + "\n"; };
-  if (out) out.textContent = "";
-
-  // Runs the real Analyze fast path — temp sequence per source, in-app export,
-  // wait for the WAV — with every swallowed error printed here instead.
-  try {
-    const medias = await gatherTargetMedia();
-    log(`sources found: ${medias.length}`);
-    for (const m of medias) log(`  · ${m.split("/").pop()}  item=${lastMediaItems.has(m)}`);
-    if (!medias.length) { log("Nothing to test — open a sequence with clips on V1."); return; }
-
-    const t0 = Date.now();
-    const res = await prerenderSourceAudio(medias, null, log);
-    const got = Object.keys(res);
-    log("");
-    if (got.length === medias.length) log(`PASS — every source rendered in ${((Date.now() - t0) / 1000).toFixed(1)}s.`);
-    else if (got.length)              log(`PARTIAL — ${got.length}/${medias.length} sources rendered.`);
-    else                              log("FAIL — no source rendered; the lines above say where it stopped.");
-    for (const [m, w] of Object.entries(res)) log(`  ${m.split("/").pop()} → ${w}`);
-  } catch (e) {
-    log(`Error: ${String((e && e.message) || e)}`);
-  }
-}));
