@@ -51,6 +51,9 @@ jobs: dict[str, dict] = {}
 # ── Request models ──────────────────────────────────────────────────────────
 class AnalyzeRequest(BaseModel):
     media_paths:    list[str]
+    # media path → 16 kHz mono WAV the panel had Premiere render up front, so we
+    # can skip ffmpeg-decoding the full video. Absent/invalid → extract as usual.
+    audio_paths:    dict[str, str] = {}
     seq_name:       str
     silence_db:     float = -40.0
     silence_dur:    float = 0.5
@@ -213,8 +216,27 @@ def _run_analyze(job_id: str, req: AnalyzeRequest):
             raise FileNotFoundError(f"Media not found: {src}")
 
         # 1. Extract mono WAV ──────────────────────────────────────────────
-        upd(10, "Extracting audio…")
-        wav_path = _extract_wav(src)
+        # The panel may hand us a WAV Premiere already rendered. Trust it only
+        # if it demonstrably covers the whole source: parseable, and duration
+        # within 2% of the source's own. A truncated render transcribes clean
+        # and finds almost nothing — a silently wrong result, the worst kind —
+        # so anything unprovable falls back to extracting ourselves.
+        wav_path = None
+        own_wav = None
+        pre = (req.audio_paths or {}).get(src)
+        if pre and Path(pre).exists() and Path(pre).stat().st_size > 44:
+            pre_dur = _wav_duration(pre)
+            try:
+                src_dur = float(_probe_media(src).get("duration") or 0)
+            except Exception:
+                src_dur = 0
+            if pre_dur and src_dur and abs(pre_dur - src_dur) <= 0.02 * src_dur:
+                upd(10, "Using Premiere-rendered audio…")
+                wav_path = pre
+        if wav_path is None:
+            upd(10, "Extracting audio…")
+            wav_path = _extract_wav(src)
+            own_wav = wav_path
         media_dur = _wav_duration(wav_path)
 
         # 2. Loudness stats → adaptive threshold suggestion ────────────────
@@ -324,8 +346,11 @@ def _run_analyze(job_id: str, req: AnalyzeRequest):
     finally:
         # Clean temp files
         try:
-            if 'wav_path' in dir():
-                Path(wav_path).unlink(missing_ok=True)
+            # Only delete the WAV if we extracted it ourselves. A pre-rendered
+            # one belongs to the panel; leaving it in /tmp also means there is
+            # something to inspect when a fast-path run looks wrong.
+            if 'own_wav' in dir() and own_wav:
+                Path(own_wav).unlink(missing_ok=True)
         except Exception:
             pass
 
@@ -467,29 +492,53 @@ def _detect_silence(wav: str, db_floor: float, min_dur: float, padding_ms: int) 
 
 # ── Transcription (CrisperWhisper) ────────────────────────────────────────
 _whisper_model = None
+_whisper_load_lock = threading.Lock()
 
 def _load_whisper():
     global _whisper_model
-    if _whisper_model is None:
-        try:
-            from crisperwhisper import CrisperWhisperModel  # type: ignore
-        except ImportError:
-            raise RuntimeError(
-                "crisperwhisper not installed.\n"
-                "Run: pip install git+https://github.com/nyrahealth/CrisperWhisper"
+    # The startup warmer and an eager first Analyze can race here; without the
+    # lock both sides would load the ~3 GB model.
+    with _whisper_load_lock:
+        if _whisper_model is None:
+            try:
+                from crisperwhisper import CrisperWhisperModel  # type: ignore
+            except ImportError:
+                raise RuntimeError(
+                    "crisperwhisper not installed.\n"
+                    "Run: pip install git+https://github.com/nyrahealth/CrisperWhisper"
+                )
+            device = _best_device()
+            _whisper_model = CrisperWhisperModel(
+                "nyralabs/CrisperWhisper2.0_large",
+                # Force the HF Transformers backend. The default "auto" prefers
+                # CTranslate2 (ct2), which needs a separately-converted CT2 model
+                # ("no model ctranslate2") and, on Apple Silicon, can't use the GPU
+                # anyway — CTranslate2 has no MPS support. Transformers runs on MPS.
+                backend="transformers",
+                device=device,
+                compute_type="float16" if device in ("cuda", "mps") else "float32",
             )
-        device = _best_device()
-        _whisper_model = CrisperWhisperModel(
-            "nyralabs/CrisperWhisper2.0_large",
-            # Force the HF Transformers backend. The default "auto" prefers
-            # CTranslate2 (ct2), which needs a separately-converted CT2 model
-            # ("no model ctranslate2") and, on Apple Silicon, can't use the GPU
-            # anyway — CTranslate2 has no MPS support. Transformers runs on MPS.
-            backend="transformers",
-            device=device,
-            compute_type="float16" if device in ("cuda", "mps") else "float32",
-        )
     return _whisper_model
+
+
+@app.on_event("startup")
+def _warm_whisper_at_boot():
+    # Premiere opening is what starts this helper, so load and warm the speech
+    # model immediately in the background. Measured on an M1 Max: a cold first
+    # Analyze pays ~12s of weight loading plus ~14s of MPS graph compilation
+    # before transcribing a single word; doing both now means the user's first
+    # run starts at full speed. The ~3 GB stays resident only while Premiere
+    # is open — the watcher shuts this process down when Premiere quits.
+    def _warm():
+        try:
+            import numpy as np
+            model = _load_whisper()
+            model.transcribe(np.zeros(16000, dtype=np.float32), sr=16000,
+                             language="en", mode="verbatim", word_timestamps=True)
+            print("Speech model preloaded and warm", flush=True)
+        except Exception as e:
+            print(f"Speech model preload skipped: {e}", flush=True)
+    threading.Thread(target=_warm, daemon=True).start()
 
 
 def _cuda_available() -> bool:
@@ -984,7 +1033,15 @@ def build_xml(req: BuildXmlRequest):
 def probe(req: ProbeRequest):
     if not Path(req.media_path).exists():
         raise HTTPException(400, f"Media not found: {req.media_path}")
-    return _probe_media(req.media_path)
+    info = _probe_media(req.media_path)
+    # The panel polls this while Premiere is still writing an export; a header
+    # can claim the final duration before the samples exist, so byte size is
+    # the only honest growth signal.
+    try:
+        info["size_bytes"] = Path(req.media_path).stat().st_size
+    except Exception:
+        info["size_bytes"] = 0
+    return info
 
 
 # ── Debug: diagnostics dump ───────────────────────────────────────────────

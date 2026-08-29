@@ -336,10 +336,193 @@ async function gatherTargetMedia() {
       let include = !selMode;
       if (selMode) { try { include = await it.getIsSelected(); } catch (_) { include = false; } }
       if (!include) continue;
-      try { const rc = ppro.ClipProjectItem.cast(await it.getProjectItem()); const mp = rc ? await rc.getMediaFilePath() : null; if (mp) set.add(mp); } catch (_) {}
+      try {
+        const rc = ppro.ClipProjectItem.cast(await it.getProjectItem());
+        const mp = rc ? await rc.getMediaFilePath() : null;
+        if (mp) { set.add(mp); if (!lastMediaItems.has(mp)) lastMediaItems.set(mp, rc); }
+      } catch (_) {}
     }
   }
   return [...set];
+}
+
+// ── Pre-rendered source audio (fast path for Analyze) ─────────────────────
+// Premiere renders each source's audio to a 16 kHz mono WAV — the exact format
+// transcription wants (its own WAV_Mono_16bit_16kHz preset) — so the helper can
+// skip ffmpeg-decoding the full video. Measured ~35x realtime via the Settings
+// probe. Every failure path just returns less, and the helper falls back to its
+// own extraction, so this can only make Analyze faster, never break it.
+let lastMediaItems = new Map();   // media path → ClipProjectItem, filled by gatherTargetMedia
+
+const WAV_PRESETS = [
+  "/Applications/Adobe Premiere Pro 2026/Adobe Premiere Pro 2026.app/Contents/Settings/EncoderPresets/WAV_Mono_16bit_16kHz.epr",
+  "/Applications/Adobe Premiere Pro (Beta)/Adobe Premiere Pro (Beta).app/Contents/Settings/EncoderPresets/WAV_Mono_16bit_16kHz.epr",
+];
+
+function mediaPathHash(s) {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+
+async function probeWavInfo(p) {
+  try {
+    const r = await fetch(`${HELPER}/probe`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ media_path: p })
+    });
+    if (!r.ok) return null;
+    const j = await r.json();
+    if (!j) return null;
+    return { duration: j.duration || 0, size: j.size_bytes || 0 };
+  } catch (_) { return null; }
+}
+
+// Do NOT use EncoderManager.encodeProjectItem here: despite the name it hands
+// the job to Adobe Media Encoder's queue (its startQueueImmediately param is
+// the tell), which cold-starts AME and is slower than just extracting with
+// ffmpeg. Only exportSequence with ExportType.IMMEDIATELY renders in-app —
+// so each source gets a throwaway sequence built around it, exported, removed.
+// The temp sequence contains the full media from zero, so sequence time equals
+// source time and every downstream timestamp is untouched.
+async function prerenderSourceAudio(mediaPaths, onStatus, dbg) {
+  const say = dbg || (() => {});
+  const out = {};
+  let project = null, mgr = null, userSeq = null;
+  try {
+    project = await ppro.Project.getActiveProject();
+    userSeq = project ? await project.getActiveSequence() : null;
+    mgr = await ppro.EncoderManager.getManager();
+  } catch (e) { say(`setup threw: ${String((e && e.message) || e)}`); }
+  if (!project || !mgr) { say(`no ${project ? "EncoderManager" : "project"} — aborting`); return out; }
+  const exportType = ppro.Constants?.ExportType?.IMMEDIATELY;
+  say(`exportType = ${JSON.stringify(exportType)}`);
+
+  for (let i = 0; i < mediaPaths.length; i++) {
+    const mp = mediaPaths[i];
+    const rc = lastMediaItems.get(mp);
+    if (!rc) { say(`no ClipProjectItem for ${mp.split("/").pop()} — skipping`); continue; }
+    if (onStatus) onStatus(i + 1, mediaPaths.length);
+
+    const tag = `${mediaPathHash(mp)}_${Date.now()}`;
+    const tmpName = `FirstPass temp audio ${tag}`;
+    const wav = `/tmp/firstpass_src_${tag}.wav`;
+
+    // createSequenceFromMedia honors the source item's in/out marks — and
+    // FirstPass's own apply pass sets marks while editing, so a leftover range
+    // renders a seconds-long WAV of a minutes-long source. (Found the hard
+    // way: a 1.57s render whose transcript was a single "um".) Read the marks,
+    // clear them for the render, put them back after. If they can't be read,
+    // don't clear them — the duration check below discards a partial render.
+    let savedIn = null, savedOut = null, clearedMarks = false;
+    try {
+      const MT_ANY = ppro.Constants?.MediaType?.ANY;
+      savedIn  = await rc.getInPoint(MT_ANY);
+      savedOut = await rc.getOutPoint(MT_ANY);
+    } catch (_) {}
+    if (savedIn && savedOut) {
+      try {
+        await project.lockedAccess(() => {
+          project.executeTransaction((c) => {
+            c.addAction(rc.createClearInOutPointsAction());
+          }, "FirstPass: clear source marks for audio render");
+        });
+        clearedMarks = true;
+      } catch (e) { say(`could not clear in/out marks: ${String((e && e.message) || e)}`); }
+    } else {
+      say("could not read in/out marks — rendering as-is");
+    }
+
+    let made = false;
+    try {
+      let tmpSeq = null;
+      try {
+        tmpSeq = await project.createSequenceFromMedia(tmpName, [rc]);
+      } catch (e) { say(`createSequenceFromMedia threw: ${String((e && e.message) || e)}`); }
+      if (!tmpSeq) { say(`no temp sequence for ${mp.split("/").pop()}`); continue; }
+      made = true;
+      say(`temp sequence created for ${mp.split("/").pop()}`);
+
+      let ok = false;
+      for (const preset of WAV_PRESETS) {
+        try { await mgr.exportSequence(tmpSeq, exportType, wav, preset, true); ok = true; break; }
+        catch (e) { say(`exportSequence (${preset.split("/")[2]}) threw: ${String((e && e.message) || e)}`); }
+      }
+      say(ok ? "export call accepted — waiting for the WAV" : "every export attempt failed");
+
+      // A WAV is done when BOTH its duration and its byte size hold steady
+      // across polls. Duration alone lies: Premiere can write the final header
+      // first and stream samples after it, so a growing file already reports
+      // its finished length — that is exactly the truncation trap.
+      if (ok) {
+        const deadline = Date.now() + 120000;
+        let lastD = -1, lastS = -1, finalD = 0;
+        while (Date.now() < deadline) {
+          const info = await probeWavInfo(wav);
+          if (info && info.duration > 0 && info.size > 44 &&
+              info.duration === lastD && info.size === lastS) {
+            say(`WAV finalized: ${info.duration}s, ${info.size} bytes`);
+            finalD = info.duration;
+            break;
+          }
+          lastD = info ? info.duration : -1;
+          lastS = info ? info.size : -1;
+          await new Promise((res) => setTimeout(res, 500));
+        }
+        if (!finalD) {
+          say(`timed out waiting for the WAV (last: ${lastD}s, ${lastS} bytes)`);
+        } else {
+          // The bug class this whole check exists for: a render that
+          // "succeeds" but covers a fraction of the source. Only a WAV within
+          // 2% of the source's own duration leaves here; the helper re-checks.
+          const srcInfo = await probeWavInfo(mp);
+          const srcDur = (srcInfo && srcInfo.duration) || 0;
+          if (srcDur && Math.abs(finalD - srcDur) <= 0.02 * srcDur) {
+            say(`duration matches source (${srcDur}s) — accepted`);
+            out[mp] = wav;
+          } else {
+            say(`WAV is ${finalD}s but the source is ${srcDur}s — discarded`);
+          }
+        }
+      }
+    } catch (_) {
+    } finally {
+      // Remove the throwaway sequence again. If any of this fails the only
+      // cost is a clearly named sequence left in the project's root bin.
+      if (made) {
+        try {
+          const root = await project.getRootItem();
+          const folder = ppro.FolderItem.cast(root);
+          const items = folder ? await folder.getItems() : [];
+          for (const it of items) {
+            let nm = null;
+            try { nm = typeof it.getName === "function" ? await it.getName() : it.name; } catch (_) {}
+            if (nm !== tmpName) continue;
+            await project.lockedAccess(() => {
+              project.executeTransaction((c) => {
+                c.addAction(folder.createRemoveItemAction(it));
+              }, "FirstPass: remove temp audio sequence");
+            });
+            break;
+          }
+        } catch (_) {}
+      }
+      // Whatever happened above, hand back the in/out marks we borrowed.
+      if (clearedMarks) {
+        try {
+          await project.lockedAccess(() => {
+            project.executeTransaction((c) => {
+              c.addAction(rc.createSetInOutPointsAction(savedIn, savedOut));
+            }, "FirstPass: restore source marks");
+          });
+        } catch (e) { say(`could not restore in/out marks: ${String((e && e.message) || e)}`); }
+      }
+    }
+  }
+
+  // Give the user back the sequence they were looking at.
+  try { if (userSeq) await project.setActiveSequence(userSeq); } catch (_) {}
+  return out;
 }
 
 // Real on-timeline totals for a set of cuts: for each target clip, count only
@@ -437,6 +620,14 @@ async function runAnalyze(kind) {
     currentKind = kind;
     let primaryStatus = null;
 
+    // Measured, not assumed: ffmpeg pulls the audio track out of a 78s clip in
+    // 0.03s — extraction was never the slow step (model load + inference are).
+    // So Analyze does NOT prerender audio through Premiere: that dance costs a
+    // visible temp-sequence flash and undo entries and saves ~nothing locally.
+    // prerenderSourceAudio and the Settings probe stay — they are the
+    // foundation for a hosted mode that uploads audio instead of footage.
+    const audioPaths = {};
+
     overlayProgress(2, `Preparing ${medias.length} clip${medias.length === 1 ? "" : "s"}…`, elapsed());
 
     // Analyze EACH distinct source file and tag its cuts, so every clip — not
@@ -454,6 +645,7 @@ async function runAnalyze(kind) {
         overlayProgress(base + (pct / 100) * span, `${msg}${label}`, elapsed());
       const params = {
         media_paths:    [M],
+        audio_paths:    audioPaths,
         seq_name:       info.seqName,
         silence_db:     parseFloat($("#sil-thresh").value),
         silence_dur:    parseFloat($("#sil-dur").value),
@@ -2110,4 +2302,40 @@ if (diagCopyBtn) diagCopyBtn.addEventListener("click", () => withBusy(diagCopyBt
   if (copied)     toast("Diagnostics copied — paste them into your issue.");
   else if (saved) toast("Saved to helper/firstpass_debug.json — attach that file.");
   else            toast("Couldn't copy. Screenshot the text above instead.", true);
+}));
+
+// ── TEMPORARY: audio-export probe ─────────────────────────────────────────
+// Premiere 26's UXP registry (embedded in the app binary) exposes
+//   EncoderManager.exportSequence(sequence, exportType, outputFile, presetFile, exportFull)
+// If this works, analysis can hand the helper a ~30 MB WAV instead of making
+// ffmpeg decode a multi-gigabyte video, and a future hosted mode could upload
+// audio only — never footage. Premiere even ships WAV_Mono_16bit_16kHz.epr,
+// which is already the format the speech model wants.
+// Remove this card once the export fast path has proven out in the field.
+// (The analyze pipeline now uses WAV_PRESETS, defined with prerenderSourceAudio.)
+const audioProbeBtn = $("#audio-probe");
+if (audioProbeBtn) audioProbeBtn.addEventListener("click", () => withBusy(audioProbeBtn, "Testing…", async () => {
+  const out = $("#audio-probe-out");
+  const log = (s) => { if (out) out.textContent += s + "\n"; };
+  if (out) out.textContent = "";
+
+  // Runs the real Analyze fast path — temp sequence per source, in-app export,
+  // wait for the WAV — with every swallowed error printed here instead.
+  try {
+    const medias = await gatherTargetMedia();
+    log(`sources found: ${medias.length}`);
+    for (const m of medias) log(`  · ${m.split("/").pop()}  item=${lastMediaItems.has(m)}`);
+    if (!medias.length) { log("Nothing to test — open a sequence with clips on V1."); return; }
+
+    const t0 = Date.now();
+    const res = await prerenderSourceAudio(medias, null, log);
+    const got = Object.keys(res);
+    log("");
+    if (got.length === medias.length) log(`PASS — every source rendered in ${((Date.now() - t0) / 1000).toFixed(1)}s.`);
+    else if (got.length)              log(`PARTIAL — ${got.length}/${medias.length} sources rendered.`);
+    else                              log("FAIL — no source rendered; the lines above say where it stopped.");
+    for (const [m, w] of Object.entries(res)) log(`  ${m.split("/").pop()} → ${w}`);
+  } catch (e) {
+    log(`Error: ${String((e && e.message) || e)}`);
+  }
 }));

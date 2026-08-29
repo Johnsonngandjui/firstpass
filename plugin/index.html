@@ -1064,6 +1064,17 @@ body {
           <p style="font-size:11px;color:var(--text-dim);margin:-4px 0 2px;">Copies your versions, hardware and most recent error to the clipboard. Paste it into a GitHub issue so the problem can be reproduced — it contains no footage, filenames or transcript text.</p>
           <pre id="diag-out" style="font-family:ui-monospace,Menlo,monospace;font-size:10px;line-height:1.5;color:var(--text-dim);background:var(--bg);border:1px solid var(--border-2);border-radius:8px;padding:10px;max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0;">Tap Copy diagnostics.</pre>
         </div>
+
+        <!-- TEMPORARY probe — remove once analysis uses Premiere's audio export.
+             See the matching block at the bottom of main.js for why this exists. -->
+        <div class="card">
+          <div class="stat-row">
+            <span class="sw-label">Audio export test (dev)</span>
+            <div class="btn secondary" role="button" tabindex="0" id="audio-probe">Export sequence audio</div>
+          </div>
+          <p style="font-size:11px;color:var(--text-dim);margin:-4px 0 2px;">Asks Premiere to render this sequence's audio to a small 16&nbsp;kHz WAV — the format transcription wants. If this passes, Analyze can skip decoding the full video.</p>
+          <pre id="audio-probe-out" style="font-family:ui-monospace,Menlo,monospace;font-size:10px;line-height:1.5;color:var(--text-dim);background:var(--bg);border:1px solid var(--border-2);border-radius:8px;padding:10px;max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0;">Tap Export sequence audio.</pre>
+        </div>
       </section>
 
       <!-- ── E. TRANSCRIPT REVIEW (overlay view) ────────────── -->
