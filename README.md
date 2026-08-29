@@ -44,7 +44,7 @@ and you see the estimated time saved before you commit.
 | **Premiere Pro** | 2026 (v25.6 or newer) — FirstPass uses the UXP editing API that older builds don't expose. |
 | **RAM** | 16 GB realistically. The 14B model wants ~10 GB while it's thinking. |
 | **Disk** | ~12 GB of one-time model downloads. |
-| **Python** | 3.10+. macOS ships 3.9, so `brew install python@3.12` if you don't have a newer one — `install.sh` will tell you. |
+| **Everything else** | Nothing to prepare. Python and Ollama are installed for you if they're missing — no Homebrew and no admin password required. |
 
 Windows is not supported yet.
 
@@ -52,9 +52,15 @@ Windows is not supported yet.
 
 ## Installing
 
-`./install.sh` handles the whole local stack: Ollama and the language model, a Python
-virtualenv, the speech model, and a background helper that starts and stops with Premiere.
-It's safe to re-run — every step is skipped if it's already done.
+Double-click **Install FirstPass.command**, or run `./install.sh` if you prefer a terminal.
+The first time, macOS may say it's from an unidentified developer — right-click the file
+and choose **Open** instead, and that prompt won't come back.
+
+It handles the whole local stack: Ollama and the language model, a Python virtualenv, the
+speech model, and a background helper that starts and stops with Premiere. If the Mac has
+no Python 3.10+ or no Ollama, both are fetched automatically — you don't need Homebrew,
+and you won't be asked for a password. It's safe to re-run; every step is skipped if it's
+already done.
 
 Then load the panel by hand (Adobe requires this):
 
@@ -70,6 +76,8 @@ The first install downloads roughly 12 GB of models. It's a one-time cost.
 
 ## Uninstalling
 
+Double-click **Uninstall FirstPass.command**, or:
+
 ```bash
 ./uninstall.sh                 # everything, including the ~12 GB of models
 ./uninstall.sh --keep-models   # keep the downloads, remove the rest
@@ -77,10 +85,11 @@ The first install downloads roughly 12 GB of models. It's a one-time cost.
 
 It lists what it found and asks before deleting anything.
 
-It removes FirstPass's language model but leaves Ollama itself installed, since
-other tools may be using it — `brew uninstall ollama` if you want it gone.
-Removing the panel from UXP Developer Tool is manual; Adobe exposes no way to
-script it.
+Anything the installer had to fetch — Python, or Ollama itself — is removed too,
+but only if FirstPass was what installed it, and Ollama only if it holds no other
+models. If Ollama was already on the machine it's left alone; `brew uninstall
+ollama` if you want it gone. Removing the panel from UXP Developer Tool is
+manual; Adobe exposes no way to script it.
 
 ---
 

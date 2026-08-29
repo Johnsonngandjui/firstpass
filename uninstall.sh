@@ -158,7 +158,43 @@ if [ -z "$KEEP_MODELS" ]; then
   fi
 fi
 
-# ── 4. Premiere's copy of the panel ─────────────────────────────────────────
+# ── 4. Things FirstPass installed for itself ────────────────────────────────
+# install.sh drops a marker whenever it installs something the machine didn't
+# already have, so this only removes what we brought with us. Without the
+# marker we leave it alone — it was here first.
+OLLAMA_MARKER="$HERE/helper/.ollama-installed-by-firstpass"
+UV_MARKER="$HERE/helper/.uv-installed-by-firstpass"
+
+if [ -f "$OLLAMA_MARKER" ] || [ -f "$UV_MARKER" ]; then
+  step "Removing what FirstPass installed for itself"
+
+  if [ -f "$UV_MARKER" ]; then
+    # ~/.local/bin/env is left alone on purpose: several unrelated installers
+    # write a file by that name, and it's a two-line PATH snippet either way.
+    rm -rf "$HOME/.local/bin/uv" "$HOME/.local/bin/uvx" "$HOME/.local/share/uv"
+    rm -f "$UV_MARKER"
+    ok "Removed uv and the private Python it fetched"
+  fi
+
+  if [ -f "$OLLAMA_MARKER" ]; then
+    # Only if nothing else is left in it. The user may have pulled their own
+    # models since, and those aren't ours to delete.
+    REMAINING=0
+    if [ -n "$OLLAMA" ] && curl -s --max-time 2 http://localhost:11434/api/version >/dev/null 2>&1; then
+      REMAINING="$("$OLLAMA" list 2>/dev/null | tail -n +2 | grep -c . || true)"
+    fi
+    if [ "${REMAINING:-0}" -gt 0 ]; then
+      warn "Leaving Ollama installed — it still holds $REMAINING other model(s)"
+    else
+      pkill -f "Ollama.app" 2>/dev/null || true
+      rm -rf /Applications/Ollama.app "$HOME/.ollama"
+      rm -f "$OLLAMA_MARKER"
+      ok "Removed Ollama, which FirstPass installed"
+    fi
+  fi
+fi
+
+# ── 5. Premiere's copy of the panel ─────────────────────────────────────────
 step "Removing the panel's stored data"
 
 REMOVED_PANEL=""
@@ -172,7 +208,16 @@ fi
 [ -n "$REMOVED_PANEL" ] && ok "Removed Premiere's stored plugin data" \
                         || skip "Nothing stored by Premiere"
 
-# ── 5. What's left for you ──────────────────────────────────────────────────
+# ── 6. What's left for you ──────────────────────────────────────────────────
+# Only mention removing Ollama if it's still here — if FirstPass installed it,
+# section 4 already took it away.
+OLLAMA_NOTE=""
+if [ -n "$(find_ollama || true)" ]; then
+  OLLAMA_NOTE="
+${dim}Ollama itself was left installed — other tools may be using it.
+If nothing else needs it:  brew uninstall ollama${rst}"
+fi
+
 cat <<DONE
 
 ${grn}${bold}Uninstalled.${rst}
@@ -183,8 +228,6 @@ ${bold}Two things this can't do for you${rst}:
      Remove on FirstPass. Adobe gives no way to script this.
   2. Delete this folder, if you want the source gone too:
      ${dim}rm -rf "$HERE"${rst}
-
-${dim}Ollama itself was left installed — other tools may be using it.
-If nothing else needs it:  brew uninstall ollama${rst}
+$OLLAMA_NOTE
 
 DONE

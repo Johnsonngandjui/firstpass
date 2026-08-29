@@ -60,7 +60,9 @@ else
   warn "No Premiere Pro in /Applications. FirstPass needs Premiere 2026 (v25.6+)."
 fi
 
-# macOS ships Python 3.9, which is below our floor — find a real one.
+# macOS ships Python 3.9, which is below our floor. If there's nothing newer we
+# fetch a private one later rather than stopping — a Mac that has never been
+# used for development is the normal case, not an error.
 PY_BIN=""
 for cand in python3.13 python3.12 python3.11 python3.10 python3; do
   if command -v "$cand" >/dev/null 2>&1; then
@@ -69,30 +71,59 @@ for cand in python3.13 python3.12 python3.11 python3.10 python3; do
     fi
   fi
 done
-[ -n "$PY_BIN" ] || die "Need Python 3.10 or newer (macOS ships 3.9).
-    Install one with:  brew install python@3.12
-    Then re-run this script."
-ok "$($PY_BIN -V) at $(command -v "$PY_BIN")"
+if [ -n "$PY_BIN" ]; then
+  ok "$($PY_BIN -V) at $(command -v "$PY_BIN")"
+else
+  ok "No Python 3.10+ yet — one will be installed just for FirstPass"
+fi
 
 # ── 2. Ollama ───────────────────────────────────────────────────────────────
 step "Setting up the local AI model"
 
-if ! command -v ollama >/dev/null 2>&1 && [ ! -x /Applications/Ollama.app/Contents/Resources/ollama ]; then
+# Ollama may be a CLI on PATH or only the .app bundle. Same discovery
+# premiere-watch.sh uses, so both agree on which binary to run.
+find_ollama() {
+  command -v ollama 2>/dev/null && return 0
+  for p in /opt/homebrew/bin/ollama /usr/local/bin/ollama \
+           /opt/homebrew/opt/ollama/bin/ollama /Applications/Ollama.app/Contents/Resources/ollama; do
+    [ -x "$p" ] && { echo "$p"; return 0; }
+  done
+  return 1
+}
+
+OLLAMA="$(find_ollama || true)"
+if [ -z "$OLLAMA" ]; then
   if command -v brew >/dev/null 2>&1; then
     echo "  Installing Ollama via Homebrew…"
     brew install ollama
   else
-    die "Ollama is not installed.
-    Download it from https://ollama.com/download, drag it to Applications,
-    open it once, then re-run this script."
+    # No Homebrew: take the official build straight from ollama.com, so this
+    # works on a Mac that has never had developer tools on it.
+    echo "  Downloading Ollama from ollama.com…"
+    TMPDIR_OLLAMA="$(mktemp -d)"
+    curl -fL --progress-bar https://ollama.com/download/Ollama-darwin.zip \
+      -o "$TMPDIR_OLLAMA/Ollama-darwin.zip" \
+      || die "Could not download Ollama. Get it from https://ollama.com/download,
+    drag it to Applications, then run this again."
+    ditto -x -k "$TMPDIR_OLLAMA/Ollama-darwin.zip" /Applications \
+      || die "Could not unpack Ollama into /Applications."
+    rm -rf "$TMPDIR_OLLAMA"
+    # Anything downloaded is quarantined, and Gatekeeper blocks the first launch
+    # of a quarantined binary. This came over HTTPS from Ollama's own release
+    # URL, and the user just asked us to install it.
+    xattr -dr com.apple.quarantine /Applications/Ollama.app 2>/dev/null || true
+    # Record that we installed it, so uninstall.sh knows it's ours to remove.
+    touch "$HERE/helper/.ollama-installed-by-firstpass"
   fi
+  OLLAMA="$(find_ollama || true)"
 fi
+[ -n "$OLLAMA" ] || die "Ollama still isn't available after installing it."
 ok "Ollama installed"
 
 # The daemon must be up to pull. Start it if it isn't.
 if ! curl -s --max-time 2 http://localhost:11434/api/version >/dev/null 2>&1; then
   echo "  Starting the Ollama service…"
-  (ollama serve >/dev/null 2>&1 &)
+  ("$OLLAMA" serve >/dev/null 2>&1 &)
   for _ in $(seq 1 30); do
     curl -s --max-time 2 http://localhost:11434/api/version >/dev/null 2>&1 && break
     sleep 1
@@ -104,11 +135,11 @@ ok "Ollama running"
 
 # Match the full name:tag — matching just "qwen2.5" would accept some other
 # variant (7b, base) and silently skip the pull that AI Flow actually needs.
-if ollama list 2>/dev/null | grep -qF "$OLLAMA_MODEL"; then
+if "$OLLAMA" list 2>/dev/null | grep -qF "$OLLAMA_MODEL"; then
   ok "Model $OLLAMA_MODEL already downloaded"
 else
   echo "  Downloading $OLLAMA_MODEL — about 9 GB, this is the long part."
-  ollama pull "$OLLAMA_MODEL"
+  "$OLLAMA" pull "$OLLAMA_MODEL"
   ok "Model downloaded"
 fi
 
@@ -125,7 +156,27 @@ if [ -d "$LEGACY_VENV" ] && [ ! -d "$VENV" ]; then
 fi
 
 if [ ! -x "$VENV/bin/python3" ]; then
-  "$PY_BIN" -m venv "$VENV"
+  if [ -n "$PY_BIN" ]; then
+    "$PY_BIN" -m venv "$VENV"
+  else
+    # Nothing on this Mac is new enough. uv is a single binary that fetches its
+    # own interpreter into the user's home folder: no Homebrew, no admin
+    # password, nothing placed anywhere system-wide.
+    UV="$(command -v uv 2>/dev/null || true)"
+    [ -x "$HOME/.local/bin/uv" ] && UV="$HOME/.local/bin/uv"
+    if [ -z "$UV" ]; then
+      echo "  Installing a private Python for FirstPass…"
+      curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1 \
+        || die "Could not install uv, which provides the Python.
+    Install Python 3.12 from https://www.python.org/downloads/macos/ and run this again."
+      UV="$HOME/.local/bin/uv"
+      touch "$HERE/helper/.uv-installed-by-firstpass"
+    fi
+    [ -x "$UV" ] || die "uv did not land where expected ($UV)."
+    # --seed puts pip inside the venv; the rest of this script installs with it.
+    "$UV" venv --seed --python 3.12 "$VENV" \
+      || die "Could not build the environment with uv."
+  fi
   ok "Created virtualenv"
 else
   ok "Virtualenv already exists"
