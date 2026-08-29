@@ -1,5 +1,5 @@
 """
-ClipCutter — AI Flow (reorder / b-roll / pacing planner)
+FirstPass — AI Flow (reorder / b-roll / pacing planner)
 
 Isolated from the cut engine on purpose: this module only READS a transcript and
 returns a structured edit *plan*. It never touches the timeline itself — the UXP
@@ -75,7 +75,7 @@ def loaded_models() -> list[str]:
 
 
 def unload_models() -> dict:
-    """Evict ClipCutter's local models from memory so Premiere gets the RAM back
+    """Evict FirstPass's local models from memory so Premiere gets the RAM back
     for smooth editing. Uses Ollama's keep_alive:0 (an empty generate call that
     tells the runtime to drop the model immediately). Safe if already unloaded."""
     freed = []

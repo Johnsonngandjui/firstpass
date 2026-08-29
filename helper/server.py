@@ -1,5 +1,5 @@
 """
-ClipCutter helper server
+FirstPass helper server
 Runs on localhost:7742 — UXP panel talks to this.
 
 Dependencies (see requirements.txt):
@@ -35,7 +35,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-app = FastAPI(title="ClipCutter Helper")
+app = FastAPI(title="FirstPass Helper")
 
 app.add_middleware(
     CORSMiddleware,
@@ -98,7 +98,7 @@ def ai_status():
 # The panel's arrange plan lives in memory and is lost if Premiere crashes.
 # We mirror it to a small JSON file on disk so that after a crash + reopen the
 # user gets their arrangement back and can just re-apply — no re-running Arrange.
-_STATE_PATH = Path(__file__).with_name("clipcutter_state.json")
+_STATE_PATH = Path(__file__).with_name("firstpass_state.json")
 
 
 @app.post("/save_state")
@@ -150,7 +150,7 @@ def free_models_route():
     try:
         import ai_flow
         result = ai_flow.unload_models()
-        print("Premiere freed up memory", flush=True)   # visible in clipcutter_helper.log
+        print("Premiere freed up memory", flush=True)   # visible in firstpass_helper.log
         return result
     except Exception as e:
         raise HTTPException(500, str(e))
@@ -949,7 +949,7 @@ def _build_fcp7_xml(media_path: str, seq_name: str, keeps: list[dict], p: dict) 
 
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE xmeml>\n<xmeml version="5">'
-        f'<sequence id="clipcutter-seq"><name>{esc(seq_name)}</name>'
+        f'<sequence id="firstpass-seq"><name>{esc(seq_name)}</name>'
         f'<duration>{tl}</duration>{rate}'
         '<media><video><format><samplecharacteristics>'
         f'{rate}<width>{w}</width><height>{h}</height></samplecharacteristics></format>'
@@ -975,7 +975,7 @@ def build_xml(req: BuildXmlRequest):
         raise HTTPException(400, "Nothing left to keep after applying all cuts.")
 
     xml_str = _build_fcp7_xml(req.media_path, req.seq_name, keeps, probe)
-    out = Path(tempfile.gettempdir()) / f"clipcutter_{uuid.uuid4().hex[:8]}.xml"
+    out = Path(tempfile.gettempdir()) / f"firstpass_{uuid.uuid4().hex[:8]}.xml"
     out.write_text(xml_str, encoding="utf-8")
     return {"xml_path": str(out), "segments": len(keeps)}
 
@@ -987,15 +987,15 @@ def probe(req: ProbeRequest):
     return _probe_media(req.media_path)
 
 
-# ── Debug: capability scan dump (temporary dev aid) ───────────────────────
-# The plugin silently POSTs a full, unfiltered dump of live-introspected
-# Premiere UXP method names here on load, so real editing-API capability can
-# be confirmed by reading this file — no console copy/paste needed.
+# ── Debug: diagnostics dump ───────────────────────────────────────────────
+# Settings → "Copy diagnostics" POSTs its report here. UXP blocks Cmd+C out of
+# the panel, so writing this file is the reliable way for a user to hand over
+# something reproducible when they open an issue.
 @app.post("/debug_log")
 async def debug_log(request: Request):
     body = await request.json()
     # fixed path next to the server so it's easy to locate regardless of TMPDIR
-    out = Path(__file__).resolve().parent / "clipcutter_debug.json"
+    out = Path(__file__).resolve().parent / "firstpass_debug.json"
     out.write_text(json.dumps(body, indent=2), encoding="utf-8")
     return {"ok": True, "path": str(out)}
 
@@ -1003,7 +1003,7 @@ async def debug_log(request: Request):
 # ── Entry point ────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
-    print("ClipCutter helper starting on http://localhost:7742")
+    print("FirstPass helper starting on http://localhost:7742")
     _dev = _best_device()
     _gpu_label = {"cuda": "yes (CUDA)", "mps": "yes (Metal/MPS)"}.get(_dev, "no (CPU mode — slower)")
     print("GPU:", _gpu_label)

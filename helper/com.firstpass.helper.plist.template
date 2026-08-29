@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  FirstPass helper LaunchAgent (template).
+
+  install.sh substitutes __FIRSTPASS_DIR__ for the real repo path and writes the
+  result to ~/Library/LaunchAgents/com.firstpass.helper.plist.
+
+  This starts premiere-watch.sh at login. The watcher is idle-cheap: it polls
+  every 5s and only launches the Python helper while Premiere is actually open,
+  so nothing heavy is resident when you're not editing.
+
+  Uninstall:
+    launchctl bootout gui/$(id -u)/com.firstpass.helper
+    rm ~/Library/LaunchAgents/com.firstpass.helper.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.firstpass.helper</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__FIRSTPASS_DIR__/helper/premiere-watch.sh</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart the watcher if it ever dies; it is the thing keeping the
+         helper's lifecycle tied to Premiere's. -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__FIRSTPASS_DIR__/helper/firstpass-helper.log</string>
+    <key>StandardErrorPath</key>
+    <string>__FIRSTPASS_DIR__/helper/firstpass-helper.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

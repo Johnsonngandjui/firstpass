@@ -1,7 +1,7 @@
 {
   "manifestVersion": 5,
-  "id": "com.clipcutter.panel",
-  "name": "ClipCutter",
+  "id": "com.firstpass.panel",
+  "name": "FirstPass",
   "version": "1.1.0",
   "main": "index.html",
   "host": {
@@ -12,7 +12,7 @@
     {
       "type": "panel",
       "id": "main",
-      "label": { "default": "ClipCutter" },
+      "label": { "default": "FirstPass" },
       "minimumSize": { "width": 340, "height": 520 },
       "preferredSize": { "width": 400, "height": 760 }
     }

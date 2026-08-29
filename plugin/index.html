@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 /* ═══════════════════════════════════════════════════════════════
-   ClipCutter — native-Adobe dark UI
+   FirstPass — native-Adobe dark UI
    Inlined (not linked) because this UXP host was not reliably
    fetching the external stylesheet on reload.
    ═══════════════════════════════════════════════════════════════ */
@@ -912,8 +912,6 @@ body {
           <div class="switch-row"><span class="sw-label">Add timeline markers <span class="info-ico" title="Drop a marker at each filler word.">i</span></span><div class="switch on" role="button" aria-pressed="true" id="sw-markers" tabindex="0"><span class="knob"></span></div></div>
           <div class="switch-row"><span class="sw-label">Highlight in transcript <span class="info-ico" title="Show flagged words in the review step.">i</span></span><div class="switch on" role="button" aria-pressed="true" id="sw-highlight" tabindex="0"><span class="knob"></span></div></div>
           <div class="switch-row"><span class="sw-label">Auto-cut filler words <span class="info-ico" title="Skip review and cut immediately.">i</span></span><div class="switch" role="button" aria-pressed="false" id="sw-autocut-filler" tabindex="0"><span class="knob"></span></div></div>
-          <div class="switch-row"><span class="sw-label">Review before removal <span class="info-ico" title="Open the transcript to confirm before cutting.">i</span></span><div class="switch on" role="button" aria-pressed="true" id="sw-review-filler" tabindex="0"><span class="knob"></span></div></div>
-          <div class="switch-row"><span class="sw-label">Add audio crossfade <span class="info-ico" title="Smooth each cut with a short crossfade.">i</span></span><div class="switch" role="button" aria-pressed="false" id="sw-crossfade" tabindex="0"><span class="knob"></span></div></div>
         </div>
 
         <div class="action-bar">
@@ -1037,7 +1035,6 @@ body {
         <p class="hint-note">Reads your timeline shots (needs a prior <b>Master</b>/analysis for the words) and picks a subtle camera move per shot — mostly static, with pushes, punch-ins and holds where they earn it. Reviewed before applying. <span style="opacity:.7;">(Undo with Cmd+Z.)</span></p>
 
         <div class="action-bar">
-          <div class="link-btn" id="edit-test-zoom" role="button" tabindex="0">Test punch-in</div>
           <span class="flex-spacer"></span>
           <div class="btn primary" id="edit-plan" role="button" tabindex="0">Plan cinematography</div>
         </div>
@@ -1057,17 +1054,15 @@ body {
             <span class="sw-label">Helper status <span class="hint" id="helper-hint">checking…</span></span>
             <span class="status-pill" id="helper-pill"><span class="dot"></span>—</span>
           </div>
-          <div class="switch-row"><span class="sw-label">Use GPU when available</span><div class="switch on" role="button" aria-pressed="true" tabindex="0"><span class="knob"></span></div></div>
-          <div class="switch-row"><span class="sw-label">Confirm before applying</span><div class="switch on" role="button" aria-pressed="true" tabindex="0"><span class="knob"></span></div></div>
         </div>
 
         <div class="card">
           <div class="stat-row">
-            <span class="sw-label">Editing API diagnostics</span>
-            <div class="btn secondary" role="button" tabindex="0" id="diag-run">Scan</div>
+            <span class="sw-label">Report a problem</span>
+            <div class="btn secondary" role="button" tabindex="0" id="diag-copy">Copy diagnostics</div>
           </div>
-          <p style="font-size:11px;color:var(--text-dim);margin:-4px 0 2px;">Live method list of the active sequence &amp; its tracks — used to confirm what in-place edits this Premiere build supports.</p>
-          <pre id="diag-out" style="font-family:ui-monospace,Menlo,monospace;font-size:10px;line-height:1.5;color:var(--text-dim);background:var(--bg);border:1px solid var(--border-2);border-radius:8px;padding:10px;max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0;">Open with a sequence active, then tap Scan.</pre>
+          <p style="font-size:11px;color:var(--text-dim);margin:-4px 0 2px;">Copies your versions, hardware and most recent error to the clipboard. Paste it into a GitHub issue so the problem can be reproduced — it contains no footage, filenames or transcript text.</p>
+          <pre id="diag-out" style="font-family:ui-monospace,Menlo,monospace;font-size:10px;line-height:1.5;color:var(--text-dim);background:var(--bg);border:1px solid var(--border-2);border-radius:8px;padding:10px;max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0;">Tap Copy diagnostics.</pre>
         </div>
       </section>
 

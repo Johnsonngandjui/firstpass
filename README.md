@@ -1,134 +1,158 @@
-# ClipCutter
+# FirstPass
 
-Premiere (UXP) plugin that removes silences, filler words (um/uh/er), and
-repeated takes from your timeline — non-destructively, with a review step before
-anything touches your edit.
+**Local AI editing for Adobe Premiere Pro.** It removes dead takes, filler words and
+silence — then reorders your story and adds the punch-ins.
 
----
+Everything runs on your Mac. No account, no API key, no subscription, and your footage
+never leaves the machine.
 
-## What you need
-
-- **Adobe Premiere 2026** (v25.6+) with UXP enabled
-- **UXP Developer Tool** — install from Creative Cloud Desktop
-- **Python 3.10+**
-- **ffmpeg** — on your PATH (`brew install ffmpeg` / `choco install ffmpeg`)
-- A GPU is optional but makes transcription ~10× faster
-
----
-
-## One-time setup
-
-### 1. Install the Python helper
+<!-- TODO: replace with demo.gif — raw take on the left, finished timeline on the right -->
+<!-- ![FirstPass demo](docs/demo.gif) -->
 
 ```bash
-cd helper
-pip install -r requirements.txt
-pip install git+https://github.com/nyrahealth/CrisperWhisper
+git clone https://github.com/<you>/firstpass.git
+cd firstpass
+./install.sh
 ```
-
-> If you don't want transcription (silence-only mode), skip the CrisperWhisper
-> line — the plugin still works, just disable the "Transcribe" toggle.
-
-### 2. Start the helper
-
-```bash
-python helper/server.py
-```
-
-You should see:
-```
-ClipCutter helper starting on http://localhost:7742
-GPU: yes (CUDA)
-CrisperWhisper: installed
-```
-
-Keep this terminal open while you edit. The helper must be running before you click Analyze.
-
-### 3. Load the plugin in Premiere
-
-1. Open **Premiere → Window → UXP Plugins → UXP Developer Tool**
-2. Click **Add Plugin**
-3. Navigate to `plugin/manifest.json` and click Open
-4. Click **Load** (or **Load & Watch** for auto-reload during development)
-5. The ClipCutter panel appears under **Window → UXP Plugins → ClipCutter**
 
 ---
 
-## Using it
+## What it does
 
-1. Open a sequence with your talking-head footage
-2. Open the ClipCutter panel
-3. The green dot in the header confirms the helper is running
-4. Adjust the sliders if needed (defaults are good for most footage)
-5. Click **Analyze sequence**
-6. Review the cut list — toggle off anything you want to keep
-7. Click **Build new sequence →**
+FirstPass is a Premiere panel backed by a helper that runs locally: speech-to-text via
+CrisperWhisper, and a 14B language model via Ollama.
 
-Your original sequence is never modified. ClipCutter creates a new sequence
-named `[original name] — ClipCutter`.
-
----
-
-## The cut types
-
-| Tag | What it is |
+| | |
 |---|---|
-| SILENCE | Gap below your dB floor, longer than min silence |
-| FILLER | um / uh / er / hmm and variants |
-| REPEAT | Repeated take — earlier attempt at the same sentence |
+| **Master** | One pass: cut repeated takes, filler words and silence together. Review before anything is applied. |
+| **AI Flow** | Reads every clip's transcript, drops dead takes, groups topics, and **reorders your timeline** into a story arc. Suggests a hook, b-roll and pacing. |
+| **AI Edit** | Plans a camera move per shot — pushes, punch-ins, holds — and writes **real Motion/Scale keyframes**. |
+| **Repeats** | Finds re-spoken lines and keeps the good take. |
+| **Filler** | um, uh, you know, basically… — editable word list. |
+| **Silence** | Threshold + minimum duration, with padding and smart dead-air detection. |
+| **Format** | Resize a sequence to Reels/TikTok, YouTube, square — in place or as a copy. |
 
-Repeated take detection marks the **earlier** stumbled attempt for removal and
-keeps the final clean version. It catches back-to-back restarts within 8 seconds.
-It does not attempt to compare takes separated by minutes (that needs the AI layer).
-
----
-
-## Silence-only mode (instant, no model needed)
-
-Uncheck **Transcribe (CrisperWhisper)** before analyzing. The plugin will run
-ffmpeg only — takes 2–3 seconds per clip, no model download required. You get
-silence removal but no filler or take detection.
+Every cut pass opens a word-level transcript first. Click any word to keep or cut it,
+and you see the estimated time saved before you commit.
 
 ---
 
-## First run note
+## Requirements
 
-The first time you click Analyze with transcription on, CrisperWhisper downloads
-its model weights (~3 GB). This only happens once. Subsequent runs load from cache.
+| | |
+|---|---|
+| **macOS** | Apple Silicon strongly recommended. Intel works but is slow — no Metal acceleration. |
+| **Premiere Pro** | 2026 (v25.6 or newer) — FirstPass uses the UXP editing API that older builds don't expose. |
+| **RAM** | 16 GB realistically. The 14B model wants ~10 GB while it's thinking. |
+| **Disk** | ~12 GB of one-time model downloads. |
+| **Python** | 3.10+. macOS ships 3.9, so `brew install python@3.12` if you don't have a newer one — `install.sh` will tell you. |
+
+Windows is not supported yet.
+
+---
+
+## Installing
+
+`./install.sh` handles the whole local stack: Ollama and the language model, a Python
+virtualenv, the speech model, and a background helper that starts and stops with Premiere.
+It's safe to re-run — every step is skipped if it's already done.
+
+Then load the panel by hand (Adobe requires this):
+
+1. Install **UXP Developer Tool** from Creative Cloud Desktop
+2. UXP Developer Tool → **Add Plugin** → select `plugin/manifest.json`
+3. Click **Load**
+4. In Premiere: **Window → UXP Plugins → FirstPass**
+
+The first install downloads roughly 12 GB of models. It's a one-time cost.
+
+---
+
+## Before you run it on real work
+
+**FirstPass edits your active sequence in place.** It does not create a copy by default.
+
+- `Cmd+Z` undoes any pass.
+- The Repeats and Silence tabs have a **Backup sequence first** toggle.
+- On anything you can't afford to lose, duplicate the sequence before you start.
+
+FirstPass reads **Video Track 1**. Media must be reachable from this machine — if your
+footage lives on a NAS, mount it before analyzing.
+
+---
+
+## What it can't do
+
+Being straight about the edges, because they're the difference between "this is broken"
+and "this isn't for me yet":
+
+- **macOS only.** No Windows build.
+- **Talking-head footage.** It's built for one or more people speaking to camera. It
+  won't do anything sensible with music videos or dialogue scenes with overlapping speakers.
+- **Each clip is transcribed separately**, so a timeline of many distinct source files takes
+  proportionally longer.
+- **AI Flow's pacing notes and continuity warnings are advisory** — they're shown for you to
+  act on, not applied automatically.
+- **The AI needs headroom.** On a 16 GB machine, quit Chrome before running AI Flow. Use
+  **Free memory** on the Master tab to unload the model when you're done and want playback back.
+- Transcription quality sets the ceiling. Heavy accents, cross-talk or bad audio degrade
+  every downstream pass.
 
 ---
 
 ## Troubleshooting
 
-**Red dot / "Helper not running"**  
-Start `python helper/server.py` in a terminal and leave it open.
+**Red dot / "Helper not running"**
+The helper only runs while Premiere is open. If it's still red, check
+`helper/firstpass-helper.log`, or start it manually:
+`helper/firstpass-env/bin/python3 helper/server.py`
 
-**"No clips found on video track 1"**  
-ClipCutter reads Video Track 1. Make sure your footage is on V1.
+**"No clips found on video track 1"**
+FirstPass reads V1. Move your footage there.
 
-**"Media not found"**  
-The media path Premiere reports must be accessible from the machine running the
-helper. If you're on a shared/NAS drive, mount it the same way.
+**AI Flow says the model isn't ready**
+Ollama isn't running or the model isn't pulled:
+`ollama serve` then `ollama pull qwen2.5:14b-instruct`
 
-**Transcription is very slow**  
-No GPU detected. It still works on CPU but a 10-minute clip may take 4–5 minutes.
-A GPU (even a modest one) brings this under 30 seconds.
+**Transcription is very slow**
+Expected on Intel or on CPU. Apple Silicon uses Metal and is dramatically faster.
 
-**CrisperWhisper install fails**  
-Try: `pip install git+https://github.com/nyrahealth/CrisperWhisper --no-build-isolation`
+**Something else**
+Settings → **Copy diagnostics**, then open an issue and paste the result. It contains
+versions and hardware only — no filenames, footage paths or transcript text.
 
 ---
 
-## Project layout
+## How it works
+
+Three processes:
 
 ```
-clipcutter/
-├── plugin/
-│   ├── manifest.json   ← Premiere UXP manifest
-│   ├── index.html      ← Panel UI
-│   ├── style.css       ← Panel styles
-│   └── main.js         ← Premiere API + helper calls
-└── helper/
-    ├── server.py        ← FastAPI server (silence, whisper, take detection)
-    └── requirements.txt
+Premiere UXP panel  ──HTTP──▶  local helper (:7742)  ──HTTP──▶  Ollama (:11434)
+plugin/                        helper/server.py                 qwen2.5:14b-instruct
+                               CrisperWhisper
 ```
+
+The panel never talks to the network beyond `localhost`. The only two outbound URLs in
+the codebase are `localhost:7742` and `localhost:11434` — everything else is on disk.
+Models are downloaded once, at install time.
+
+```
+firstpass/
+├── install.sh
+├── plugin/
+│   ├── manifest.json    ← UXP manifest
+│   ├── index.html       ← the panel UI (styles are inline)
+│   └── main.js          ← Premiere API wiring + helper calls
+└── helper/
+    ├── server.py        ← FastAPI: transcription, silence/filler/repeat detection
+    ├── ai_flow.py       ← story + cinematography planning prompts
+    └── premiere-watch.sh ← starts/stops the helper with Premiere
+```
+
+---
+
+## License
+
+[FSL-1.1-ALv2](LICENSE.md) — free to use, including on paid client work. You just can't
+repackage it as a competing product. Converts to Apache 2.0 two years after each release.

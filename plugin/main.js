@@ -1,12 +1,17 @@
 /* ═══════════════════════════════════════════════════════════════
-   ClipCutter — UI controller + Premiere/helper wiring
+   FirstPass — UI controller + Premiere/helper wiring
 
-   Flow: read the active sequence's source clip (ppro) → POST /analyze
-   on the local helper → poll /status → review (word transcript for
-   filler/repeats/master, a cut-list for silence) → POST /build_xml →
-   project.importFiles() so Premiere assembles the tightened cut as a
-   new, fully-editable sequence (UXP has no razor/ripple/delete API,
-   so this XML-import path is how the cut actually gets applied).
+   Flow: read the active sequence's clips (ppro) → POST /analyze on the
+   local helper, once per distinct source file → poll /status → review
+   (word transcript for filler/repeats/master, a cut-list for silence)
+   → apply the cut to the ACTIVE sequence in place via SequenceEditor
+   (overwrite-split + remove, see rebuildInPlace).
+
+   Note: earlier builds round-tripped through /build_xml + importFiles()
+   to produce a NEW sequence, because the razor/ripple API wasn't
+   exposed. Premiere 26 exposes it, so we edit in place and rely on
+   Cmd+Z. The helper's /build_xml endpoint is a leftover from that era
+   and is no longer called from here.
    ═══════════════════════════════════════════════════════════════ */
 
 const { entrypoints } = require("uxp");
@@ -20,7 +25,7 @@ const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 // Build marker — bump when you change the panel so a reload is easy to confirm.
 // After reloading in UDT, this line appears in the UDT debug console.
 const BUILD = "flow-14b+progress-overlay · 2026-08-20";
-console.log("ClipCutter panel loaded — build:", BUILD);
+console.log("FirstPass panel loaded — build:", BUILD);
 
 entrypoints.setup({ panels: { main: { show() {}, hide() {} } } });
 
@@ -784,13 +789,13 @@ async function rebuildInPlace(app, project, sequence, cuts, ripple, onStep) {
         await project.lockedAccess(() => {
           project.executeTransaction((c) => {
             c.addAction(srcClip.createSetInOutPointsAction(mkTT(s), mkTT(e)));
-          }, "ClipCutter: in/out");
+          }, "FirstPass: in/out");
         });
         P.v = `split(ts=${ts.toFixed(2)},v=${vIndex})`;
         await project.lockedAccess(() => {
           project.executeTransaction((c) => {
             c.addAction(editor.createOverwriteItemAction(rawItem, mkTT(ts), vIndex, vIndex));
-          }, "ClipCutter: split silence");
+          }, "FirstPass: split silence");
         });
 
         P.v = `find@${ts.toFixed(2)}`;
@@ -814,7 +819,7 @@ async function rebuildInPlace(app, project, sequence, cuts, ripple, onStep) {
               // shiftOverLapping=false → following clips slide over to close the gap
               const a = editor.createRemoveItemsAction(sel, !!ripple, MT, false);
               if (a) c.addAction(a);
-            }, "ClipCutter: ripple-delete silence");
+            }, "FirstPass: ripple-delete silence");
           });
           removed++;
         } else { skipped++; }
@@ -856,7 +861,7 @@ async function applyCuts(kind) {
   if (wantsBackup(kind) && typeof sequence.createCloneAction === "function") {
     await project.lockedAccess(() => {
       project.executeTransaction((c) => c.addAction(sequence.createCloneAction()),
-                                 "ClipCutter: backup sequence");
+                                 "FirstPass: backup sequence");
     });
   }
 
@@ -990,13 +995,13 @@ async function assembleReorder(app, project, sequence, orderedSegs, onStep) {
         await project.lockedAccess(() => {
           project.executeTransaction((c) => {
             c.addAction(src.srcClip.createSetInOutPointsAction(mkTT(inS), mkTT(outS)));
-          }, "ClipCutter: segment in/out");
+          }, "FirstPass: segment in/out");
         });
         P.v = `overwrite@${pos.toFixed(2)}`;
         await project.lockedAccess(() => {
           project.executeTransaction((c) => {
             c.addAction(editor.createOverwriteItemAction(src.rawItem, mkTT(pos), 0, 0));
-          }, "ClipCutter: place segment");
+          }, "FirstPass: place segment");
         });
         pos += len; extent = Math.max(extent, pos); n++;
         step(6 + (n / total) * 80, `Placing segment ${n} of ${total}`, `${n} / ${total}`);
@@ -1037,7 +1042,7 @@ async function assembleReorder(app, project, sequence, orderedSegs, onStep) {
           project.executeTransaction((c) => {
             const a = editor.createRemoveItemsAction(sel, true, MT, false);
             if (a) c.addAction(a);
-          }, "ClipCutter: trim tail");
+          }, "FirstPass: trim tail");
         });
       } catch (_) { /* leave the tail rather than risk a crash */ }
     }
@@ -1182,7 +1187,7 @@ async function rippleDeleteInPlace(app, project, sequence, cuts, report, opts = 
             const action = sequence[method](TT(c.startSec), TT(c.endSec));
             if (action) { compound.addAction(action); count++; }
           }
-        }, `ClipCutter: ripple-delete via ${method}`);
+        }, `FirstPass: ripple-delete via ${method}`);
       });
       if (count > 0) return { count, method };
       tried.push(method + " (returned no action)");
@@ -1263,7 +1268,7 @@ async function applyFormat() {
     await project.lockedAccess(() => {
       project.executeTransaction((compound) => {
         compound.addAction(srcSequence.createCloneAction());
-      }, "ClipCutter: duplicate sequence");
+      }, "FirstPass: duplicate sequence");
     });
     const after = await project.getSequences();
     targetSeq = after.find(s => !before.has(s.guid)) || after[after.length - 1];
@@ -1286,7 +1291,7 @@ async function applyFormat() {
   await project.lockedAccess(() => {
     project.executeTransaction((compound) => {
       compound.addAction(targetSeq.createSetSettingsAction(settings));
-    }, "ClipCutter: resize sequence");
+    }, "FirstPass: resize sequence");
   });
 
   const verify = await targetSeq.getFrameSize().catch(() => null);
@@ -1351,7 +1356,7 @@ async function addTimelineMarkers(cuts) {
             } catch (e) { if (chosen === -1) errs[i] = (e && e.message ? e.message : String(e)); }
           }
         }
-      }, "ClipCutter: add markers");
+      }, "FirstPass: add markers");
     });
     if (!count) lastMarkerError = "all signatures failed → " + errs.map((m, i) => `[${i}] ${m}`).filter(Boolean).join(" | ");
     return count;
@@ -1632,20 +1637,6 @@ if (freeMemBtn) freeMemBtn.addEventListener("click", () => withBusy(freeMemBtn, 
 // record which worked / the errors, with phase tracking.
 const MOTION_SCALE_INDEX = 1;
 
-async function getSelectedVideoClip(sequence) {
-  const CLIP = ppro.Constants?.TrackItemType?.Clip ?? 1;
-  let vCount = 1; try { vCount = await sequence.getVideoTrackCount(); } catch (_) {}
-  for (let vt = 0; vt < vCount; vt++) {
-    const trk = await sequence.getVideoTrack(vt).catch(() => null);
-    if (!trk) continue;
-    for (const it of (await trk.getTrackItems(CLIP, false) || [])) {
-      let sel = false; try { sel = await it.getIsSelected(); } catch (_) {}
-      if (sel) return it;
-    }
-  }
-  return null;
-}
-
 async function getScaleParam(clip) {
   const chain = await clip.getComponentChain();
   const n = await chain.getComponentCount();
@@ -1709,52 +1700,6 @@ async function emphasisZoom(clip, atSec, opts = {}) {
   }
 }
 
-// Probe which keyframe-value method this build honors: push Scale to 130 at
-// distinct times using each candidate approach, then read the value back.
-async function probeScaleValueSet(clip) {
-  const project = await ppro.Project.getActiveProject();
-  const mkTT = (s) => ppro.TickTime.createWithSeconds(s);
-  const scale = await getScaleParam(clip);
-  if (!scale) return ["no Scale param"];
-  let si = 0; try { const p = await clip.getInPoint(); si = p ? p.seconds : 0; } catch (_) {}
-  await project.lockedAccess(() => { project.executeTransaction((c) => { c.addAction(scale.createSetTimeVaryingAction(true)); }, "probe tv"); });
-
-  const T = 130;
-  const approaches = [
-    ["A createKeyframe(v)+position+add", (tt, c) => { const k = scale.createKeyframe(T); try { k.position = tt; } catch (_) {} try { k.time = tt; } catch (_) {} c.addAction(scale.createAddKeyframeAction(k)); }],
-    ["B createKeyframe(v)+.value+position+add", (tt, c) => { const k = scale.createKeyframe(T); try { k.value = T; } catch (_) {} try { k.position = tt; } catch (_) {} try { k.time = tt; } catch (_) {} c.addAction(scale.createAddKeyframeAction(k)); }],
-    ["C addKeyframeAction(tt) then setValueAction(v,tt)", (tt, c) => { const a = scale.createAddKeyframeAction(tt); if (a) c.addAction(a); const b = scale.createSetValueAction(T, tt); if (b) c.addAction(b); }],
-    ["D createSetValueAction(v,tt)", (tt, c) => { const a = scale.createSetValueAction(T, tt); if (a) c.addAction(a); }],
-    ["E createKeyframe(tt,v)+add", (tt, c) => { const k = scale.createKeyframe(tt, T); c.addAction(scale.createAddKeyframeAction(k)); }],
-    ["F createKeyframe(tt) set .value +add", (tt, c) => { const k = scale.createKeyframe(tt); try { k.value = T; } catch (_) {} c.addAction(scale.createAddKeyframeAction(k)); }],
-  ];
-  const out = [];
-  for (let i = 0; i < approaches.length; i++) {
-    const t = si + 0.3 + i * 0.5, tt = mkTT(t);
-    let err = "";
-    try { await project.lockedAccess(() => { project.executeTransaction((c) => { approaches[i][1](tt, c); }, "probe set " + i); }); }
-    catch (e) { err = e && e.message ? e.message : String(e); }
-    let got = "?";
-    try { const vo = await scale.getValueAtTime(tt); got = (vo && vo.value != null) ? vo.value : JSON.stringify(vo); } catch (e) { got = "read-err"; }
-    out.push(`${approaches[i][0]} @${t.toFixed(2)}s → value=${got}${err ? "  ERR:" + err : ""}`);
-  }
-  return out;
-}
-
-const editTestBtn = $("#edit-test-zoom");
-if (editTestBtn) editTestBtn.addEventListener("click", () => withBusy(editTestBtn, "Probing…", async () => {
-  const st = $("#edit-status"); st.className = "ai-status"; st.classList.remove("hidden");
-  st.textContent = "Probing keyframe value-set methods…";
-  const project = await ppro.Project.getActiveProject();
-  const sequence = project && await project.getActiveSequence();
-  if (!sequence) { st.className = "ai-status err"; st.textContent = "No active sequence."; return; }
-  const clip = await getSelectedVideoClip(sequence);
-  if (!clip) { st.className = "ai-status err"; st.textContent = "Select a video clip on the timeline first."; return; }
-  const res = await probeScaleValueSet(clip);
-  st.className = "ai-status";
-  st.textContent = "Value-set probe (look for value=130):\n" + res.join("\n");
-  try { await fetch(`${HELPER}/debug_log`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scaleValueProbe: res }) }); } catch (_) {}
-}));
 
 // Generic scale-keyframe writer (used by AI Edit moves). kfList: [[timelineSec, scale%]].
 async function applyScaleKeyframes(clip, kfList) {
@@ -2092,178 +2037,77 @@ function listAllMethods(obj) {
   return [...names].sort();
 }
 
-let lastEditReport = null;
 
-// Deep-probe the effects/keyframe API: walk a clip's component chain → the
-// Motion component → its params (Scale/Position) → their keyframe methods.
-async function probeMotion(items) {
-  const statics = (c) => c ? Object.getOwnPropertyNames(c).filter(n => { try { return typeof c[n] === "function"; } catch (_) { return false; } }).sort() : [];
-  const dump = (c) => ({ statics: statics(c), proto: c ? listAllMethods(c) : [] });
-  const M = { classes: {
-    VideoComponentChain: dump(ppro.VideoComponentChain),
-    Component:           dump(ppro.Component),
-    ComponentFactory:    dump(ppro.ComponentFactory),
-    VideoFilterFactory:  dump(ppro.VideoFilterFactory),
-    VideoFilterComponent:dump(ppro.VideoFilterComponent),
-    Keyframe:            dump(ppro.Keyframe),
-    PointKeyframe:       dump(ppro.PointKeyframe),
-    Properties:          dump(ppro.Properties),
-  }};
-  try {
-    let item = null;
-    for (const it of items) { try { if (await it.getIsSelected()) { item = it; break; } } catch (_) {} }
-    if (!item) item = items[0];
-    M.clip = item ? await item.getName().catch(() => "?") : "(no clip)";
-    const chain = item && typeof item.getComponentChain === "function" ? await item.getComponentChain() : null;
-    M.chainMethods = chain ? listAllMethods(chain) : ["(no chain)"];
+// ── Diagnostics for bug reports ─────────────────────────────────────────────
+// Editors report problems in plain language ("it just didn't work"), which is
+// not reproducible. This collects the machine facts that actually matter —
+// versions, device, whether the models are present — and deliberately nothing
+// about the footage: no paths, filenames or transcript text.
+let LAST_ERROR = null;
+try {
+  window.addEventListener("error", (e) => { LAST_ERROR = e?.message || String(e); });
+  window.addEventListener("unhandledrejection", (e) => {
+    const r = e?.reason; LAST_ERROR = (r && r.message) ? r.message : String(r);
+  });
+} catch (_) {}
 
-    let count = 0;
-    const countName = ["getComponentCount", "getCount", "getComponentsCount"].find(n => chain && typeof chain[n] === "function");
-    if (countName) { try { count = await chain[countName](); } catch (_) {} }
-    M.componentCount = count; M.countName = countName || "(none)";
-    const getName = ["getComponentAtIndex", "getComponent", "getComponentAt"].find(n => chain && typeof chain[n] === "function");
-    M.componentGetter = getName || "(none)";
-
-    M.components = [];
-    if (chain && getName) {
-      for (let i = 0; i < Math.min(count || 6, 8); i++) {
-        try {
-          const comp = await chain[getName](i);
-          if (!comp) continue;
-          const mn = typeof comp.getMatchName === "function" ? await comp.getMatchName().catch(() => "") : "";
-          const nm = typeof comp.getName === "function" ? await comp.getName().catch(() => "") : "";
-          const info = { index: i, matchName: mn, name: nm, methods: listAllMethods(comp) };
-          let pc = 0;
-          const pcName = ["getParamCount", "getParameterCount", "getPropertyCount"].find(n => typeof comp[n] === "function");
-          if (pcName) { try { pc = await comp[pcName](); } catch (_) {} }
-          info.paramCount = pc; info.paramCountName = pcName || "(none)";
-          const pGet = ["getParam", "getParamAtIndex", "getParameter", "getProperty"].find(n => typeof comp[n] === "function");
-          info.paramGetter = pGet || "(none)";
-          if (pGet) {
-            info.params = [];
-            for (let p = 0; p < Math.min(pc || 10, 16); p++) {
-              try {
-                const prm = await comp[pGet](p);
-                if (!prm) continue;
-                let kf = "?"; try { kf = await prm.areKeyframesSupported(); } catch (_) {}
-                const vinfo = {};
-                try {
-                  const v = await prm.getStartValue();
-                  vinfo.jsType = typeof v;
-                  if (v && typeof v === "object") {
-                    vinfo.ownProps = Object.getOwnPropertyNames(v);
-                    vinfo.methods = listAllMethods(v);
-                    // try common value accessors
-                    try { vinfo.dotValue = JSON.stringify(v.value); } catch (_) {}
-                    for (const g of ["getValue", "get", "value"]) {
-                      try { if (typeof v[g] === "function") { vinfo["call_" + g] = JSON.stringify(await v[g]()); } } catch (_) {}
-                    }
-                  } else {
-                    vinfo.scalar = v;
-                  }
-                } catch (e) { vinfo.err = e && e.message ? e.message : String(e); }
-                info.params.push({ index: p, keyframable: kf, value: vinfo });
-              } catch (_) {}
-            }
-          }
-          M.components.push(info);
-        } catch (_) {}
-      }
-    }
-  } catch (e) { M.error = e && e.message ? e.message : String(e); }
-  return M;
-}
-
-async function buildEditReport() {
-  const project = await ppro.Project.getActiveProject();
-  if (!project) throw new Error("No active project open.");
-  const sequence = await project.getActiveSequence();
-  if (!sequence) throw new Error("No active sequence — open your timeline.");
-
-  const CLIP = ppro.Constants?.TrackItemType?.Clip ?? 1;
-  const vTrack = await sequence.getVideoTrack(0);
-  const items  = vTrack ? await vTrack.getTrackItems(CLIP, false) : [];
-  const aTrack = sequence.getAudioTrack ? await sequence.getAudioTrack(0).catch(() => null) : null;
-
-  // Probe the marker API (which shape does this build expose?)
-  const statics = (cls) => cls ? Object.getOwnPropertyNames(cls).filter(n => { try { return typeof cls[n] === "function"; } catch (_) { return false; } }).sort() : [];
-  let markersObj = null;
-  try { markersObj = await resolveMarkersObj(sequence); } catch (_) {}
-  const markerClassStatics  = statics(ppro.Marker);
-  const markersClassStatics = statics(ppro.Markers);
-  const markerClass = ppro.Marker ? listAllMethods(ppro.Marker) : [];
-
-  const report = {
-    host: (() => { try { const h = require("uxp").host; return `${h?.name} ${h?.version}`; } catch (_) { return "?"; } })(),
-    pproClasses: Object.getOwnPropertyNames(ppro).sort(),
-    project:    listAllMethods(project),
-    sequence:   listAllMethods(sequence),
-    videoTrack: vTrack ? listAllMethods(vTrack) : [],
-    audioTrack: aTrack ? listAllMethods(aTrack) : [],
-    trackItem:  items[0] ? listAllMethods(items[0]) : [],
-    trackItemCount: items.length,
-    markersObj: markersObj ? listAllMethods(markersObj) : ["(could not resolve Markers object)"],
-    markerClassStatics,
-    markersClassStatics,
-    markerClassProto: markerClass,
-    markerTypeEnum: (() => { try { return ppro.Constants && ppro.Constants.MarkerType ? JSON.parse(JSON.stringify(ppro.Constants.MarkerType)) : "(no Constants.MarkerType)"; } catch (_) { return "(unreadable)"; } })(),
-    lastMarkerError: lastMarkerError || "(none — try Add b-roll markers first)",
-    motion: await probeMotion(items)
+async function collectDiagnostics() {
+  const probe = async (path) => {
+    try {
+      const r = await fetch(`${HELPER}${path}`);
+      return r.ok ? await r.json() : { error: `HTTP ${r.status}` };
+    } catch (_) { return { error: "helper unreachable" }; }
   };
-  lastEditReport = report;
-  return report;
-}
+  const [health, ai] = await Promise.all([probe("/health"), probe("/ai_status")]);
 
-// Methods across sequence/track/item that could perform an in-place edit
-function findEditPrimitives(report) {
-  const RX = /razor|split|ripple|delete|remove|lift|extract|insert|overwrite|trim|cut|edit|clear/i;
-  const grab = (arr, src) => (arr || []).filter(n => RX.test(n)).map(n => `${src}.${n}`);
+  const host = (() => {
+    try { const h = require("uxp").host; return `${h?.name} ${h?.version}`; } catch (_) { return "unknown"; }
+  })();
+  const platform = (() => {
+    try { const os = require("os"); return `${os.platform()} ${os.release?.() || ""}`.trim(); } catch (_) { return "unknown"; }
+  })();
+
   return [
-    ...grab(report.sequence, "sequence"),
-    ...grab(report.videoTrack, "videoTrack"),
-    ...grab(report.trackItem, "trackItem"),
-    ...grab(report.project, "project")
-  ];
+    `FirstPass:   ${BUILD}`,
+    `Premiere:    ${host}`,
+    `Platform:    ${platform}`,
+    `Helper:      ${health.error ? health.error : "running"}`,
+    `Whisper:     ${health.error ? "?" : (health.whisper ? "installed" : "MISSING")}`,
+    `ffmpeg:      ${health.error ? "?" : (health.ffmpeg ? "found" : "MISSING")}`,
+    `AI runtime:  ${ai.error ? ai.error : (ai.runtime ? "running" : "NOT RUNNING")}`,
+    `AI model:    ${ai.error ? "?" : (ai.model ? "ready" : "NOT PULLED")}`,
+    `Last error:  ${LAST_ERROR || "(none this session)"}`
+  ].join("\n");
 }
 
-function renderDiagnostics(report) {
+const diagCopyBtn = $("#diag-copy");
+if (diagCopyBtn) diagCopyBtn.addEventListener("click", () => withBusy(diagCopyBtn, "Collecting…", async () => {
+  const report = await collectDiagnostics();
   const out = $("#diag-out");
-  if (!out) return;
-  const primitives = findEditPrimitives(report);
-  const fmt = (label, arr) => `── ${label} (${arr.length}) ──\n${arr.join(", ") || "(none)"}\n`;
-  const markerNames = [...(report.markersObj || []), ...(report.markerClassStatics || []), ...(report.markerClassProto || [])]
-    .filter(n => /marker/i.test(n) || /add|create/i.test(n));
-  out.textContent =
-    `host: ${report.host}\nclips on V1: ${report.trackItemCount}\n\n` +
-    `★ IN-PLACE EDIT CANDIDATES (${primitives.length}):\n${primitives.join("\n") || "(none found)"}\n\n` +
-    `★ MARKER API — last error: ${report.lastMarkerError}\n` +
-    `MarkerType enum: ${JSON.stringify(report.markerTypeEnum)}\n` +
-    fmt("resolved Markers object methods", report.markersObj) +
-    fmt("ppro.Markers statics", report.markersClassStatics) +
-    fmt("ppro.Marker statics", report.markerClassStatics) +
-    fmt("ppro.Marker proto", report.markerClassProto) +
-    `\n` +
-    fmt("ppro classes", report.pproClasses) +
-    fmt("sequence", report.sequence) +
-    fmt("videoTrack", report.videoTrack) +
-    fmt("audioTrack", report.audioTrack) +
-    fmt("trackItem", report.trackItem) +
-    fmt("project", report.project);
-}
+  if (out) out.textContent = report;
 
-async function runDiagnostics() {
-  const report = await buildEditReport();
-  renderDiagnostics(report);
-  // UXP blocks copy-paste from the panel, so also write the report to disk via
-  // the helper (helper/clipcutter_debug.json) for out-of-band inspection.
+  // UXP blocks Cmd+C out of the panel, so try the clipboard API and fall back to
+  // writing the file via the helper — one of the two always gives the user
+  // something they can attach to an issue.
+  let copied = false;
   try {
-    await fetch(`${HELPER}/debug_log`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(report)
-    });
+    const { clipboard } = require("uxp");
+    if (clipboard && clipboard.setContent) {
+      await clipboard.setContent({ "text/plain": report });
+      copied = true;
+    }
   } catch (_) {}
-  return report;
-}
 
-const diagBtn = $("#diag-run");
-if (diagBtn) diagBtn.addEventListener("click", () => withBusy(diagBtn, "Scanning…", runDiagnostics));
+  let saved = false;
+  try {
+    const r = await fetch(`${HELPER}/debug_log`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ diagnostics: report })
+    });
+    saved = r.ok;
+  } catch (_) {}
+
+  if (copied)     toast("Diagnostics copied — paste them into your issue.");
+  else if (saved) toast("Saved to helper/firstpass_debug.json — attach that file.");
+  else            toast("Couldn't copy. Screenshot the text above instead.", true);
+}));
