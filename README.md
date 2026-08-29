@@ -69,6 +69,19 @@ The first install downloads roughly 12 GB of models. It's a one-time cost.
 
 ---
 
+## Uninstalling
+
+```bash
+./uninstall.sh                 # everything, including the ~12 GB of models
+./uninstall.sh --keep-models   # keep the downloads, remove the rest
+```
+
+It lists what it found and asks before deleting anything. Two things it can't do
+for you: removing the panel from UXP Developer Tool, and uninstalling Ollama —
+which it leaves alone, since other tools may be using it.
+
+---
+
 ## Before you run it on real work
 
 **FirstPass edits your active sequence in place.** It does not create a copy by default.
