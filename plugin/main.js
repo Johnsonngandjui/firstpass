@@ -689,6 +689,7 @@ async function runAnalyze(kind) {
     mediaDuration = mediaDurations[medias[0]] ?? mediaDuration;
     lastAnalysis = primaryStatus;   // loudness/method readout reflects the first clip
     await gatherClipMetas();         // ALL target clips, tagged with media
+    await saveFlowState();           // transcript survives a panel/Premiere restart
   } finally {
     overlayHide();
   }
@@ -1660,14 +1661,53 @@ function keptWords() {
 }
 const segById = (id) => (flowSegs || []).find(s => s.id === id);
 
+// Flow and Camera work from Master's transcript, but they shouldn't strand
+// someone who came straight here. Transcription touches nothing on the
+// timeline, so when there's no transcript yet we simply make one and carry on
+// — a transcribe-only analyze per source: no cuts detected, nothing applied.
+async function ensureTranscript(onMsg) {
+  const info = await getSequenceInfo();
+  const medias = await gatherTargetMedia();
+  if (!medias.length) throw new Error("No clips found for this scope.");
+
+  // Coverage is per source file, not "any words at all": a transcript restored
+  // from another project would count as present while matching none of these
+  // clips — and the model would plan blind again. Drop words that belong to
+  // media not on this timeline, then transcribe only what's actually missing
+  // (which also picks up clips added since the last Master run).
+  allWords = allWords.filter(w => !w._media || medias.includes(w._media));
+  const missing = medias.filter(M => !allWords.some(w => w._media === M));
+  if (!missing.length) return;
+
+  for (let mi = 0; mi < missing.length; mi++) {
+    const M = missing[mi];
+    const label = missing.length > 1 ? ` · clip ${mi + 1}/${missing.length}` : "";
+    const status = await startAndPoll({
+      media_paths:    [M],
+      seq_name:       info.seqName,
+      transcribe:     true,
+      detect_silence: false,
+      remove_fillers: false,
+      detect_takes:   false,
+      smart_silence:  false,
+      auto_threshold: false
+    }, (pct, msg) => { if (onMsg) onMsg(`No transcript yet — transcribing first${label}: ${msg}`); });
+    allWords.push(...(status.words || []).map(w => ({ ...w, _media: M })));
+    mediaDurations[M] = status.duration;
+  }
+  await gatherClipMetas();
+  await saveFlowState();   // the fresh transcript survives a restart too
+}
+
 async function planFlow() {
-  const g = buildGlobalTimeline();
-  flowGlobal = g;
-  const words = g.gWords;
-  if (!words.length) throw new Error("No transcript yet — run Master (or an analysis) first.");
   const status = $("#flow-status");
   status.className = "ai-status";
   status.classList.remove("hidden");
+  await ensureTranscript((m) => { status.textContent = m; });
+  const g = buildGlobalTimeline();
+  flowGlobal = g;
+  const words = g.gWords;
+  if (!words.length) throw new Error("The transcript came back empty — is there speech on these clips?");
   status.textContent = "Removing repeated takes and arranging the story… a long clip can take a minute.";
   $("#flow-result").classList.add("hidden");
 
@@ -2054,13 +2094,13 @@ async function planEdit() {
   const project = await ppro.Project.getActiveProject();
   const sequence = project && await project.getActiveSequence();
   if (!sequence) throw new Error("No active sequence — open your timeline.");
-  // Without a transcript the shots come back text-less and the model plans
-  // camera moves blind — it "works" and produces nonsense. Hard-stop instead.
-  if (!allWords.length) throw new Error("Run Master first — the camera follows your words, and there's no transcript yet.");
+  const st = $("#edit-status"); st.className = "ai-status"; st.classList.remove("hidden");
+  // Without a transcript the shots come back text-less and the model would
+  // plan camera moves blind — so make the transcript first (touches nothing).
+  await ensureTranscript((m) => { st.textContent = m; });
   const shots = await gatherShots(sequence);
   if (!shots.length) throw new Error("No clips on the timeline.");
   editShots = shots;
-  const st = $("#edit-status"); st.className = "ai-status"; st.classList.remove("hidden");
   st.textContent = "Planning your camera moves… a moment.";
   $("#edit-result").classList.add("hidden");
 
@@ -2183,6 +2223,9 @@ async function saveFlowState(patch) {
     const body = JSON.stringify({
       v: 1, kind: "flow", savedAt: Date.now(),
       plan: flowPlan, segs: flowSegs, cuts: allCuts, durs: mediaDurations,
+      // The transcript is the expensive part — persisting it means AI Flow and
+      // AI Camera still work after a panel or Premiere restart.
+      words: allWords,
       ...(patch || {})
     });
     await fetch(`${HELPER}/save_state`, {
@@ -2200,7 +2243,18 @@ async function restoreFlowState() {
     const r = await fetch(`${HELPER}/load_state`);
     if (r.ok) state = (await r.json()).state;
   } catch (_) { return; }               // helper offline — nothing to restore
-  if (!state || state.kind !== "flow" || !state.plan || !state.segs) return;
+  if (!state) return;
+
+  // Phase 1: the transcript alone — restored even when no plan was saved, so
+  // AI Flow / AI Camera work after a restart without re-running Master.
+  if (Array.isArray(state.words) && state.words.length && !allWords.length) {
+    allWords = state.words;
+    if (Array.isArray(state.cuts)) allCuts = state.cuts;
+    if (state.durs && typeof state.durs === "object") mediaDurations = state.durs;
+  }
+
+  // Phase 2: a saved arrangement, with its recovery UI.
+  if (state.kind !== "flow" || !state.plan || !state.segs) return;
 
   flowPlan = state.plan;
   flowSegs = state.segs;
