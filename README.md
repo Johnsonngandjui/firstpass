@@ -76,9 +76,12 @@ The first install downloads roughly 12 GB of models. It's a one-time cost.
 ./uninstall.sh --keep-models   # keep the downloads, remove the rest
 ```
 
-It lists what it found and asks before deleting anything. Two things it can't do
-for you: removing the panel from UXP Developer Tool, and uninstalling Ollama —
-which it leaves alone, since other tools may be using it.
+It lists what it found and asks before deleting anything.
+
+It removes FirstPass's language model but leaves Ollama itself installed, since
+other tools may be using it — `brew uninstall ollama` if you want it gone.
+Removing the panel from UXP Developer Tool is manual; Adobe exposes no way to
+script it.
 
 ---
 
