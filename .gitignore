@@ -21,6 +21,10 @@ helper/firstpass_state.json
 # nothing here ships one — this just keeps a local build from being committed.
 *.ccx
 
+# Screen recordings used to cut docs/demo.gif — the source files are large and
+# the exported gif is the only thing worth keeping.
+*.mov
+
 # macOS
 .DS_Store
 

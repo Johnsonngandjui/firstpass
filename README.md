@@ -6,8 +6,7 @@ silence — then reorders your story and adds the punch-ins.
 Everything runs on your Mac. No account, no API key, no subscription, and your footage
 never leaves the machine.
 
-<!-- TODO: replace with demo.gif — raw take on the left, finished timeline on the right -->
-<!-- ![FirstPass demo](docs/demo.gif) -->
+![FirstPass demo](docs/demo.gif)
 
 ```bash
 git clone https://github.com/Johnsonngandjui/firstpass.git
