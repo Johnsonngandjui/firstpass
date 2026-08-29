@@ -166,9 +166,6 @@ body {
 .content::-webkit-scrollbar-thumb { background: #3a3a3a; border-radius: 8px; border: 2px solid var(--bg); }
 
 .view { display: none; flex-direction: column; gap: 18px; }
-/* Settings is a list of unrelated controls rather than one flow, so its cards
-   get more air between them to read as separate sections. */
-.settings-view.active { gap: 28px; }
 .view.active { display: flex; animation: fade 0.18s ease; }
 @keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 
@@ -1025,7 +1022,9 @@ body {
           </div>
         </div>
 
-        <div class="card">
+        <!-- Spacing is set inline: UXP does not reliably apply flex `gap`,
+             which is why margins are used for spacing throughout this file. -->
+        <div class="card" style="margin-top:22px;">
           <div class="stat-row">
             <span class="sw-label">Local AI model</span>
             <div class="btn secondary" id="free-mem" role="button" tabindex="0">Free memory</div>
@@ -1034,7 +1033,7 @@ body {
           <span id="free-mem-status" style="font-size:11.5px;color:var(--text-dim);"></span>
         </div>
 
-        <div class="card">
+        <div class="card" style="margin-top:22px;">
           <div class="stat-row">
             <span class="sw-label">Report a problem</span>
             <div class="btn secondary" role="button" tabindex="0" id="diag-copy">Copy diagnostics</div>
