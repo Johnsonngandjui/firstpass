@@ -166,6 +166,9 @@ body {
 .content::-webkit-scrollbar-thumb { background: #3a3a3a; border-radius: 8px; border: 2px solid var(--bg); }
 
 .view { display: none; flex-direction: column; gap: 18px; }
+/* Settings is a list of unrelated controls rather than one flow, so its cards
+   get more air between them to read as separate sections. */
+.settings-view.active { gap: 28px; }
 .view.active { display: flex; animation: fade 0.18s ease; }
 @keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 
@@ -971,13 +974,6 @@ body {
         </div>
 
         <p class="hint-note">Next: <b>AI Flow</b> to rearrange the story, <b>AI Camera</b> to add movement.</p>
-
-        <p class="hint-note" style="margin-top:20px;">Done with the AI passes? Free the local model from memory so Premiere plays back smoothly. It reloads automatically next time you run AI Flow.</p>
-        <div class="action-bar">
-          <span id="free-mem-status" style="font-size:11.5px;color:var(--text-dim);"></span>
-          <span class="flex-spacer"></span>
-          <div class="btn secondary" id="free-mem" role="button" tabindex="0">Free memory</div>
-        </div>
       </section>
 
       <!-- ── AI Flow ────────────────────────────────────────── -->
@@ -1017,7 +1013,7 @@ body {
       </section>
 
       <!-- ── Settings ───────────────────────────────────────── -->
-      <section class="view" data-view="settings">
+      <section class="view settings-view" data-view="settings">
         <header class="view-head">
           <h1>Settings</h1>
           <p>Helper connection and preferences.</p>
@@ -1027,6 +1023,15 @@ body {
             <span class="sw-label">Helper status <span class="hint" id="helper-hint">checking…</span></span>
             <span class="status-pill" id="helper-pill"><span class="dot"></span>—</span>
           </div>
+        </div>
+
+        <div class="card">
+          <div class="stat-row">
+            <span class="sw-label">Local AI model</span>
+            <div class="btn secondary" id="free-mem" role="button" tabindex="0">Free memory</div>
+          </div>
+          <p style="font-size:11px;color:var(--text-dim);margin:-4px 0 2px;">The model stays in memory for a few minutes after an AI pass. Free it now if playback feels heavy. It reloads by itself next time you run AI Flow or AI Camera.</p>
+          <span id="free-mem-status" style="font-size:11.5px;color:var(--text-dim);"></span>
         </div>
 
         <div class="card">
