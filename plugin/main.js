@@ -3104,6 +3104,14 @@ async function hrApplyMatte(startSeqOpt) {
   catch (err) { overlayHide(); throw err; }
 
   overlayProgress(80, "Keying the clip…", "");
+  // Every fact about the keying step lands in firstpass_debug.json via the
+  // helper — the popup write has failed silently on this build before, and
+  // the toast is too small to carry the whole story.
+  const dbg = { step: "track-matte-key", matteTrack, components: [], params: [], attempts: [] };
+  const shipDbg = () => fetch(`${HELPER}/debug_log`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ headroom_matte: dbg, at: new Date().toISOString() })
+  }).catch(() => {});
   try {
     const chain = await clip.getComponentChain();
     let comp = null;
@@ -3111,12 +3119,14 @@ async function hrApplyMatte(startSeqOpt) {
     for (let i = 0; i < n; i++) {
       const c = await chain.getComponentAtIndex(i);
       const mn = typeof c.getMatchName === "function" ? await c.getMatchName() : "";
-      if (/track\s*matte/i.test(mn)) { comp = c; break; }
+      dbg.components.push(mn);
+      if (/track\s*matte/i.test(mn)) { comp = c; }
     }
     if (!comp) {
       const F = ppro.VideoFilterFactory;
       const names = (await F.getMatchNames().catch(() => null)) || [];
       const nm = names.find((m) => /track\s*matte/i.test(m));
+      dbg.factoryMatch = nm || `none of ${names.length} names`;
       if (!nm) throw new Error("No Track Matte Key effect on this build.");
       const fresh = await F.createComponent(nm);
       await project.lockedAccess(() => project.executeTransaction((c) => {
@@ -3128,6 +3138,7 @@ async function hrApplyMatte(startSeqOpt) {
         const mn = typeof c.getMatchName === "function" ? await c.getMatchName() : "";
         if (/track\s*matte/i.test(mn)) { comp = c; break; }
       }
+      dbg.appended = !!comp;
     }
     let popupOk = false, popupInfo = "";
     if (comp) {
@@ -3136,31 +3147,56 @@ async function hrApplyMatte(startSeqOpt) {
       for (let i = 0; i < pc; i++) {
         const p = await comp.getParam(i);
         const dn = String(p.displayName || "").toLowerCase();
+        dbg.params.push(dn);
         if (dn === "matte") cand.unshift(p);
         else if (dn.includes("matte") && !dn.includes("composite") && !dn.includes("using")) cand.push(p);
       }
+      // Read a popup back through both APIs — getStartValue lies on some
+      // params that getValueAtTime answers, and vice versa.
+      const readBack = async (p) => {
+        let v = null;
+        try { const kf = await p.getStartValue(); if (kf && kf.value != null) v = Number(kf.value); } catch (_) {}
+        if (v == null || !isFinite(v)) {
+          try { const kf = await p.getValueAtTime(ppro.TickTime.createWithSeconds(0)); if (kf && kf.value != null) v = Number(kf.value); } catch (_) {}
+        }
+        return (v != null && isFinite(v)) ? v : null;
+      };
       for (const p of cand) {
         for (const val of [matteTrack + 1, matteTrack, matteTrack + 2]) {
+          const att = { param: String(p.displayName || ""), val };
           try {
-            const kf = await hrMakeKf(p, val);
+            // Popup params can refuse createKeyframe(number) — borrow the
+            // param's own start keyframe and overwrite its value as fallback.
+            let kf = null;
+            try { kf = await hrMakeKf(p, val); } catch (e) { att.mk = e.message; }
+            if (!kf) {
+              const start = await p.getStartValue().catch(() => null);
+              if (start) { start.value = val; kf = start; att.borrowed = true; }
+            }
+            if (!kf) { att.err = "no keyframe"; dbg.attempts.push(att); continue; }
             await project.lockedAccess(() => project.executeTransaction((c) => {
               try { c.addAction(p.createSetValueAction(kf, true)); }
               catch (_) { c.addAction(p.createSetValueAction(kf)); }
             }, "FirstPass: matte track"));
             await sleep(100);
-            const rb = await p.getStartValue().catch(() => null);
-            const got = rb && rb.value != null ? Number(rb.value) : null;
+            const got = await readBack(p);
+            att.reads = got;
             popupInfo = `wrote ${val}, reads ${got}`;
+            dbg.attempts.push(att);
             if (got === val) { popupOk = true; break; }
-          } catch (e) { popupInfo = e.message; }
+          } catch (e) { att.err = e.message; dbg.attempts.push(att); popupInfo = e.message; }
         }
         if (popupOk) break;
       }
     }
+    dbg.popupOk = popupOk; dbg.popupInfo = popupInfo;
+    await shipDbg();
     if (!popupOk) { overlayHide(); return { track: matteTrack, popupSet: false, info: popupInfo }; }
   } catch (err) {
+    dbg.thrown = err && err.message ? err.message : String(err);
+    await shipDbg();
     overlayHide();
-    return { track: matteTrack, popupSet: false };
+    return { track: matteTrack, popupSet: false, info: dbg.thrown };
   }
   overlayHide();
   return { track: matteTrack, popupSet: true };

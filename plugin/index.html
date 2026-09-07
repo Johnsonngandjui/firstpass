@@ -198,12 +198,16 @@ body {
    ignores flex gap between siblings, so margins do the spacing). */
 section[data-view="headroom"] .card { margin-bottom: 14px; }
 section[data-view="headroom"] .card-title { margin-bottom: 2px; }
-#hr-grid { display: grid; grid-template-columns: repeat(3, 44px); gap: 8px; }
-#hr-grid .hr-pos { height: 44px; padding: 0; font-size: 15px; border-radius: 50%; }
+/* UXP has no CSS Grid (flexbox only) — a grid container renders empty, which
+   is exactly how the 3×3 dial and shape buttons vanished. Fixed-width wrap:
+   3 cells × 44px + 2 gaps × 8px = 148px, so flex-wrap breaks rows of three. */
+#hr-grid { display: flex; flex-wrap: wrap; gap: 8px; width: 148px; }
+#hr-grid .hr-pos { width: 44px; height: 44px; padding: 0; font-size: 15px; border-radius: 50%; flex: 0 0 auto; }
 .hr-row2 { display: flex; gap: 20px; margin-top: 10px; }
 .hr-col { display: flex; flex-direction: column; gap: 10px; }
 .hr-col.grow { flex: 1; min-width: 0; }
-.hr-shapes { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+.hr-shapes { display: flex; flex-wrap: wrap; gap: 8px; }
+.hr-shapes .hr-shape { flex: 1 1 42%; }   /* two per row; UXP-safe (no grid) */
 .hr-shape, .hr-shapes .btn { min-height: 46px; }
 .hr-lbl { font-size: 11px; color: var(--text-mute); font-weight: 600; letter-spacing: .4px; text-transform: uppercase; }
 section[data-view="headroom"] .action-bar { margin-top: 0; }
@@ -844,7 +848,7 @@ section[data-view="headroom"] .card { gap: 12px; }
       </nav>
 
       <div class="sidebar-foot">
-        <span class="version">v1.1.0</span>
+        <span class="version">v1.1.0 · b0907e</span>
       </div>
     </aside>
 
