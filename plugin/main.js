@@ -2658,14 +2658,16 @@ async function hrApplyInner(P) {
 
   // rounding/circle rides the same click — matte starts where the move lands
   P.v = "matte";
+  const raceT = (p, ms, tag) => Promise.race([p,
+    new Promise((_, rej) => setTimeout(() => rej(new Error(tag + " timed out")), ms))]);
   let matteNote = "";
   if (hrBox && (hrShapeMode === "circle" || hrRadiusPx() > 0)) {
     try {
-      const m = await hrApplyMatte(seqT + effDur);
+      const m = await raceT(hrApplyMatte(seqT + effDur), 45000, "matte");
       if (m) matteNote = m.popupSet
         ? (hrShapeMode === "circle" ? ` · circled (matte V${m.track + 1})` : ` · corners rounded (matte V${m.track + 1})`)
         : ` · matte on V${m.track + 1} — set Track Matte Key ▸ Matte to it (${m.info || "popup write refused"})`;
-    } catch (e) { matteNote = ` · rounding skipped: ${e.message}`; }
+    } catch (e) { overlayHide(); matteNote = ` · rounding skipped: ${e.message}`; }
   }
   toast((effDur > 0
     ? `Moving there over ${effDur.toFixed(1)}s from the playhead${verified}.`
@@ -2930,6 +2932,9 @@ function hrRenderOverlays() {
 (function hrWireFramePicker() {
   const wrap = $("#hr-frame-wrap");
   if (!wrap) return;
+  const fi = $("#hr-frame"), bi = $("#hr-box-img");
+  if (fi) fi.addEventListener("load", () => hrRenderOverlays());
+  if (bi) bi.addEventListener("load", () => hrRenderOverlays());
   const clamp01 = (v) => Math.max(0, Math.min(1, v));
   let drag = null;  // { kind: "new"|"move"|"resize", sx, sy, box0 }
   const fracs = (e) => {
