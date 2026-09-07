@@ -2088,6 +2088,33 @@ async function mgResolveTrack(app, project, sequence, editor) {
   throw new Error("No empty video track for the graphics. Add an empty video track above your clips, then try again.");
 }
 
+// Last-resort track maker: drop rawItem one slot ABOVE the top track. The
+// add-item backend builds the missing track for that edit — the same thing
+// dragging a clip above V-max does in the timeline — but no registry flag
+// promises it, so verify the track really appeared and holds the clip before
+// trusting it. Returns the new track index, or -1 if the build refused.
+async function mgPlaceOnNewTopTrack(app, project, sequence, editor, rawItem, startTT) {
+  const CLIP = app.Constants?.TrackItemType?.Clip ?? 1;
+  const count = await sequence.getVideoTrackCount();
+  const makers = [() => editor.createOverwriteItemAction(rawItem, startTT, count, 0)];
+  if (typeof editor.createInsertProjectItemAction === "function")
+    makers.push(() => editor.createInsertProjectItemAction(rawItem, startTT, count, 0, true));
+  for (const mk of makers) {
+    try {
+      await project.lockedAccess(() => project.executeTransaction((c) => {
+        c.addAction(mk());
+      }, "FirstPass: place on new track"));
+      await sleep(150);
+      if ((await sequence.getVideoTrackCount()) > count) {
+        const trk = await sequence.getVideoTrack(count);
+        const items = trk ? await trk.getTrackItems(CLIP, false) : [];
+        if (items && items.length) return count;
+      }
+    } catch (_) {}
+  }
+  return -1;
+}
+
 async function applyMotionGraphics() {
   if (!mgManifest || !mgFolder) throw new Error("Pick a graphics folder first.");
   const graphics = mgManifest.filter(g => g.present);
@@ -2139,7 +2166,9 @@ async function applyMotionGraphics() {
     }
   } catch (_) {}
 
-  const trackIndex = await mgResolveTrack(app, project, sequence, editor);
+  let trackIndex = null, resolveErr = null;
+  try { trackIndex = await mgResolveTrack(app, project, sequence, editor); }
+  catch (e) { resolveErr = e; }   // the first placement below gets one more shot
 
   let placed = 0, skipped = 0;
   const total = graphics.length;
@@ -2167,6 +2196,17 @@ async function applyMotionGraphics() {
           c.addAction(srcClip.createSetInOutPointsAction(mkTT(0), mkTT(dur)));
         }, "FirstPass: trim graphic"));
       }
+      if (trackIndex == null) {
+        // No add-track primitive and no empty top track: create the track by
+        // placing this graphic one slot above the top (verified inside).
+        const idx = await mgPlaceOnNewTopTrack(app, project, sequence, editor, rawItem, mkTT(g.startSec));
+        if (idx < 0) { skipped++; continue; }   // placed stays 0 → resolveErr surfaces below
+        trackIndex = idx;
+        placed++;
+        overlayProgress(6 + (placed / total) * 90, `Placing graphic ${placed} of ${total}`, `${placed} / ${total}`);
+        await sleep(160);
+        continue;
+      }
       // audio index 0: graphics are video-only — passing trackIndex there can
       // target a nonexistent audio track and silently fail the whole action.
       await project.lockedAccess(() => project.executeTransaction((c) => {
@@ -2179,7 +2219,7 @@ async function applyMotionGraphics() {
   }
 
   overlayHide();
-  if (!placed) throw new Error("Couldn't place any graphics — the timeline is unchanged.");
+  if (!placed) throw (resolveErr || new Error("Couldn't place any graphics — the timeline is unchanged."));
   const extra = skipped ? ` · ${skipped} skipped` : "";
   toast(`Added ${placed} graphic${placed === 1 ? "" : "s"} on a new track${extra}. (Cmd+Z to undo.)`);
 }
@@ -2999,7 +3039,6 @@ async function hrPlaceFile(path, durSec, startSec) {
     if (mp === path) { rawItem = it; break; }
   }
   if (!rawItem) throw new Error("Rendered overlay didn't import.");
-  const trackIndex = await mgResolveTrack(ppro, project, sequence, editor);
   const srcClip = ppro.ClipProjectItem.cast(rawItem);
   if (srcClip && typeof srcClip.createSetInOutPointsAction === "function") {
     try {
@@ -3007,6 +3046,13 @@ async function hrPlaceFile(path, durSec, startSec) {
         c.addAction(srcClip.createSetInOutPointsAction(mkTT(0), mkTT(durSec)));
       }, "FirstPass: trim highlight"));
     } catch (_) { /* stills may refuse an out-point — place at default length */ }
+  }
+  let trackIndex;
+  try { trackIndex = await mgResolveTrack(ppro, project, sequence, editor); }
+  catch (resolveErr) {
+    const idx = await mgPlaceOnNewTopTrack(ppro, project, sequence, editor, rawItem, mkTT(startSec));
+    if (idx < 0) throw resolveErr;
+    return idx;   // placed while creating the track — done
   }
   await project.lockedAccess(() => project.executeTransaction((c) => {
     c.addAction(editor.createOverwriteItemAction(rawItem, mkTT(startSec), trackIndex, 0));
