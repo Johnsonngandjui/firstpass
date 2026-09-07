@@ -2759,15 +2759,21 @@ async function hrRefreshFrame() {
 
   if (!bgMeta && !selMeta) throw new Error("No clips under the playhead.");
   const rectAR = await sequence.getFrameSize().catch(() => null);
+  const frameImg = $("#hr-frame"), wrapEl = $("#hr-frame-wrap");
   if (bgMeta) {
-    $("#hr-frame").src = await hrGrab(bgMeta.mp, bgMeta.srcTime);
+    frameImg.src = await hrGrab(bgMeta.mp, bgMeta.srcTime);
+    frameImg.style.display = "block";
+    wrapEl.style.height = "";
   } else {
-    const cv = document.createElement("canvas");
-    cv.width = 640; cv.height = rectAR ? Math.round(640 * rectAR.height / rectAR.width) : 360;
-    const g = cv.getContext("2d"); g.fillStyle = "#000"; g.fillRect(0, 0, cv.width, cv.height);
-    $("#hr-frame").src = cv.toDataURL("image/png");
+    // sequence floor is truly black — no canvas API in UXP, so size the wrap
+    // to the sequence aspect and let its background be the black
+    frameImg.style.display = "none";
+    wrapEl.style.background = "#000";
+    const ar = rectAR ? rectAR.height / rectAR.width : 9 / 16;
+    wrapEl.style.display = "block";
+    wrapEl.style.height = Math.round((wrapEl.clientWidth || 300) * ar) + "px";
   }
-  $("#hr-frame-wrap").style.display = "block";
+  wrapEl.style.display = "block";
 
   const boxImg = $("#hr-box-img");
   if (selMeta && boxImg) {
