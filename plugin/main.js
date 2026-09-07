@@ -2258,13 +2258,41 @@ async function hrCurrentValue(param) {
   return kf ? kf.value : null;
 }
 
-// One keyframe, the shape this build honors (probed by AI Motion): create,
-// set .position, add. Optionally ease it afterwards — best-effort, motion
-// still lands linear on builds that reject the interpolation action.
+// Building a Keyframe is the fragile part: Scale takes a bare number, but
+// Position values are point-shaped and different builds accept different
+// shapes ("illegal parameter type" when guessed wrong). Try every plausible
+// shape — including create-empty-then-assign — and remember what worked.
+let hrKfShape = null;   // remembered working strategy index per session
+function hrMakeKf(param, value) {
+  const xy = hrReadXY(value);
+  const strategies = [
+    () => param.createKeyframe(value),
+    ...(xy ? [
+      () => param.createKeyframe([xy[0], xy[1]]),
+      () => param.createKeyframe({ x: xy[0], y: xy[1] }),
+    ] : []),
+    () => { const kf = param.createKeyframe(); kf.value = xy ? [xy[0], xy[1]] : value; return kf; },
+    ...(xy ? [() => { const kf = param.createKeyframe(); kf.value = { x: xy[0], y: xy[1] }; return kf; }] : []),
+  ];
+  const order = hrKfShape != null
+    ? [strategies[hrKfShape], ...strategies.filter((_, i) => i !== hrKfShape)]
+    : strategies;
+  let lastErr = null;
+  for (let i = 0; i < order.length; i++) {
+    try {
+      const kf = order[i]();
+      if (kf) { if (hrKfShape == null) hrKfShape = strategies.indexOf(order[i]); return kf; }
+    } catch (e) { lastErr = e; }
+  }
+  throw new Error("This build rejected every keyframe value shape" + (lastErr ? ` (${lastErr.message})` : ""));
+}
+
+// One keyframe: build, set .position, add. Optionally ease it afterwards —
+// best-effort, motion still lands linear on builds that reject interpolation.
 function hrAddKf(project, param, value, tt, ease) {
   return project.lockedAccess(() => {
     project.executeTransaction((c) => {
-      const kf = param.createKeyframe(value);
+      const kf = hrMakeKf(param, value);
       kf.position = tt;
       c.addAction(param.createAddKeyframeAction(kf));
       if (ease && typeof param.createSetInterpolationAtKeyframeAction === "function") {
@@ -2294,8 +2322,9 @@ async function hrDrive(project, param, target, t0, dur) {
     await project.lockedAccess(() => {
       project.executeTransaction((c) => {
         try { c.addAction(param.createSetTimeVaryingAction(false)); } catch (_) {}
-        const kf = param.createKeyframe(target);
-        c.addAction(param.createSetValueAction(kf, true));
+        const kf = hrMakeKf(param, target);
+        try { c.addAction(param.createSetValueAction(kf, true)); }
+        catch (_) { c.addAction(param.createSetValueAction(kf)); }
       }, "FirstPass: Headroom place");
     });
     return;
@@ -2321,11 +2350,20 @@ function hrUiChoice() {
 }
 
 async function hrApply() {
+  const P = { v: "start" };
+  try { await hrApplyInner(P); }
+  catch (e) { throw new Error(`${e && e.message ? e.message : e} [at: ${P.v}]`); }
+}
+
+async function hrApplyInner(P) {
   hrStatus("");
+  P.v = "open project";
   const project = await ppro.Project.getActiveProject();
   const sequence = project && await project.getActiveSequence();
   if (!sequence) throw new Error("No active sequence — open your timeline.");
+  P.v = "find selected clip";
   const clip = await hrSelectedClip(sequence);
+  P.v = "read Motion params";
   const { pos, scale } = await hrMotionParams(clip);
   let { fx, fy, scalePct, durSec } = hrUiChoice();
 
@@ -2343,6 +2381,7 @@ async function hrApply() {
 
   // Discover the position space from the clip's own current value: values ≤ 2
   // mean normalized (0..1); anything bigger means sequence pixels.
+  P.v = "read Position value";
   const curPosRaw = await hrCurrentValue(pos);
   const curXY = hrReadXY(curPosRaw);
   if (!curXY) throw new Error("Couldn't read this clip's Position value.");
@@ -2354,11 +2393,14 @@ async function hrApply() {
   }
   const posTarget = hrMakeXY(curPosRaw, px, py);
 
+  P.v = "read playhead";
   const playhead = await sequence.getPlayerPosition().catch(() => null);
   const t0 = playhead ? playhead.seconds : 0;
 
+  P.v = "write Position";
   await hrDrive(project, pos, posTarget, t0, durSec);
   await sleep(100);
+  P.v = "write Scale";
   await hrDrive(project, scale, scalePct, t0, durSec);
 
   toast(durSec > 0
