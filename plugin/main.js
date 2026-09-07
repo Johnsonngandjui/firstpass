@@ -2258,42 +2258,64 @@ async function hrCurrentValue(param) {
   return kf ? kf.value : null;
 }
 
-// Building a Keyframe is the fragile part: Scale takes a bare number, but
-// Position values are point-shaped and different builds accept different
-// shapes ("illegal parameter type" when guessed wrong). Try every plausible
-// shape — including create-empty-then-assign — and remember what worked.
-let hrKfShape = null;   // remembered working strategy index per session
-function hrMakeKf(param, value) {
+// Building a Keyframe: Scale takes a bare number, but Position keyframes are
+// PointKeyframes whose value is a PointF CLASS INSTANCE (registry-confirmed:
+// PointF has readWrite x/y) — arrays and plain objects are rejected with
+// "illegal parameter type". So for point params we hand createKeyframe a real
+// PointF: either constructed, or borrowed fresh from getStartValue() with its
+// x/y overwritten. Async because the borrow needs an await.
+async function hrMakeKf(param, value) {
   const xy = hrReadXY(value);
-  const strategies = [
-    () => param.createKeyframe(value),
-    ...(xy ? [
-      () => param.createKeyframe([xy[0], xy[1]]),
-      () => param.createKeyframe({ x: xy[0], y: xy[1] }),
-    ] : []),
-    () => { const kf = param.createKeyframe(); kf.value = xy ? [xy[0], xy[1]] : value; return kf; },
-    ...(xy ? [() => { const kf = param.createKeyframe(); kf.value = { x: xy[0], y: xy[1] }; return kf; }] : []),
-  ];
-  const order = hrKfShape != null
-    ? [strategies[hrKfShape], ...strategies.filter((_, i) => i !== hrKfShape)]
-    : strategies;
-  let lastErr = null;
-  for (let i = 0; i < order.length; i++) {
-    try {
-      const kf = order[i]();
-      if (kf) { if (hrKfShape == null) hrKfShape = strategies.indexOf(order[i]); return kf; }
-    } catch (e) { lastErr = e; }
+  const errs = [];
+  const attempt = (label, fn) => {
+    try { const kf = fn(); if (kf) return kf; errs.push(`${label}: empty`); }
+    catch (e) { errs.push(`${label}: ${e.message}`); }
+    return null;
+  };
+
+  // Numbers (Scale) — the long-proven path first.
+  if (!xy || typeof value === "number") {
+    const kf = attempt("raw", () => param.createKeyframe(value));
+    if (kf) return kf;
   }
-  throw new Error("This build rejected every keyframe value shape" + (lastErr ? ` (${lastErr.message})` : ""));
+
+  if (xy) {
+    // 1) A real PointF instance, constructed.
+    if (ppro.PointF) {
+      let kf = attempt("new PointF", () => param.createKeyframe(new ppro.PointF(xy[0], xy[1])));
+      if (kf) return kf;
+      kf = attempt("PointF()", () => param.createKeyframe(ppro.PointF(xy[0], xy[1])));
+      if (kf) return kf;
+    }
+    // 2) Borrow a live PointF from the param's own start value and overwrite it.
+    try {
+      const start = await param.getStartValue();
+      if (start && start.value != null) {
+        const inst = start.value;
+        const kf = attempt("borrowed PointF", () => {
+          if ("x" in inst) { inst.x = xy[0]; inst.y = xy[1]; }
+          else if (Array.isArray(inst)) { inst[0] = xy[0]; inst[1] = xy[1]; }
+          return param.createKeyframe(inst);
+        });
+        if (kf) return kf;
+      }
+    } catch (e) { errs.push(`getStartValue: ${e.message}`); }
+    // 3) Last-ditch plain shapes for builds that DO take them.
+    for (const [label, v] of [["array", [xy[0], xy[1]]], ["object", { x: xy[0], y: xy[1] }], ["raw", value]]) {
+      const kf = attempt(label, () => param.createKeyframe(v));
+      if (kf) return kf;
+    }
+  }
+  throw new Error("Keyframe value rejected — tried: " + errs.join(" · "));
 }
 
-// One keyframe: build, set .position, add. Optionally ease it afterwards —
-// best-effort, motion still lands linear on builds that reject interpolation.
-function hrAddKf(project, param, value, tt, ease) {
-  return project.lockedAccess(() => {
+// One keyframe: build (async — may borrow a PointF), set .position, add.
+// Easing is best-effort; motion lands linear on builds that reject it.
+async function hrAddKf(project, param, value, tt, ease) {
+  const kf = await hrMakeKf(param, value);
+  kf.position = tt;
+  await project.lockedAccess(() => {
     project.executeTransaction((c) => {
-      const kf = hrMakeKf(param, value);
-      kf.position = tt;
       c.addAction(param.createAddKeyframeAction(kf));
       if (ease && typeof param.createSetInterpolationAtKeyframeAction === "function") {
         try { c.addAction(param.createSetInterpolationAtKeyframeAction(tt, HR_INTERP_BEZIER, true)); } catch (_) {}
@@ -2319,10 +2341,10 @@ async function hrDrive(project, param, target, t0, dur) {
     return ppro.TickTime.createWithSeconds(Math.round(v * 1000) / 1000);
   };
   if (dur <= 0) {
+    const kf = await hrMakeKf(param, target);
     await project.lockedAccess(() => {
       project.executeTransaction((c) => {
         try { c.addAction(param.createSetTimeVaryingAction(false)); } catch (_) {}
-        const kf = hrMakeKf(param, target);
         try { c.addAction(param.createSetValueAction(kf, true)); }
         catch (_) { c.addAction(param.createSetValueAction(kf)); }
       }, "FirstPass: Headroom place");

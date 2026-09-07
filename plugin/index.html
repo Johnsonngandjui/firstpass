@@ -187,7 +187,30 @@ body {
 }
 .card.compact { padding: 6px 16px; }
 .card-title { font-size: 12px; color: var(--text-dim); font-weight: 600; }
+
+/* Keyboard accessibility: a visible focus ring on every actionable element. */
+[role="button"]:focus-visible, .seg:focus-visible, input:focus-visible {
+  outline: 2px solid var(--accent, #7c8cff);
+  outline-offset: 2px;
+}
+
+/* Headroom: uniform rhythm — same card gap as the rest of the app (UXP
+   ignores flex gap between siblings, so margins do the spacing). */
+section[data-view="headroom"] .card { margin-bottom: 14px; }
+section[data-view="headroom"] .card-title { margin-bottom: 2px; }
+#hr-grid { display: grid; grid-template-columns: repeat(3, 48px); gap: 8px; margin: 8px 0 4px; }
+#hr-grid .hr-pos { height: 38px; padding: 0; font-size: 15px; }
 #hr-grid .hr-pos.active { border-color: var(--accent, #7c8cff); color: var(--text); }
+.hr-input {
+  background: var(--bg);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-input);
+  color: var(--text);
+  font-size: 13px;
+  padding: 8px 10px;
+  outline: none;
+}
+.hr-input-lbl { font-size: 11px; color: var(--text-mute); align-self: center; }
 
 .field { display: flex; flex-direction: column; gap: 9px; min-width: 0; }
 .field.dimmed { opacity: 0.38; pointer-events: none; }
@@ -1064,7 +1087,7 @@ body {
 
         <p class="hint-note">Select the clip on the timeline first. Everything is undoable. <span style="opacity:.7;">(Cmd+Z.)</span></p>
 
-        <div class="card" style="margin-bottom:12px;">
+        <div class="card">
           <div class="card-title">Frame picker <span style="opacity:.6;font-weight:400;">— grabs the frame under the playhead</span></div>
           <div class="action-bar" style="margin-top:8px;">
             <div class="segmented compact" data-group="hr-mode">
@@ -1085,18 +1108,18 @@ body {
           <p class="hint-note" id="hr-frame-hint" style="margin-top:8px;">Refresh, then drag a box (Destination/Focus) or click a point (Zoom).</p>
         </div>
 
-        <div class="card" style="margin-bottom:12px;">
+        <div class="card">
           <div class="card-title">Position</div>
-          <div id="hr-grid" style="display:grid;grid-template-columns:repeat(3,44px);gap:8px;margin:10px 0 4px;">
-            <div class="btn secondary hr-pos" data-x="0.18" data-y="0.18" role="button" tabindex="0" style="height:34px;padding:0;">↖</div>
-            <div class="btn secondary hr-pos" data-x="0.5"  data-y="0.18" role="button" tabindex="0" style="height:34px;padding:0;">↑</div>
-            <div class="btn secondary hr-pos" data-x="0.82" data-y="0.18" role="button" tabindex="0" style="height:34px;padding:0;">↗</div>
-            <div class="btn secondary hr-pos" data-x="0.18" data-y="0.5"  role="button" tabindex="0" style="height:34px;padding:0;">←</div>
-            <div class="btn secondary hr-pos active" data-x="0.5" data-y="0.5" role="button" tabindex="0" style="height:34px;padding:0;">•</div>
-            <div class="btn secondary hr-pos" data-x="0.82" data-y="0.5"  role="button" tabindex="0" style="height:34px;padding:0;">→</div>
-            <div class="btn secondary hr-pos" data-x="0.18" data-y="0.82" role="button" tabindex="0" style="height:34px;padding:0;">↙</div>
-            <div class="btn secondary hr-pos" data-x="0.5"  data-y="0.82" role="button" tabindex="0" style="height:34px;padding:0;">↓</div>
-            <div class="btn secondary hr-pos" data-x="0.82" data-y="0.82" role="button" tabindex="0" style="height:34px;padding:0;">↘</div>
+          <div id="hr-grid">
+            <div class="btn secondary hr-pos" data-x="0.18" data-y="0.18" role="button" tabindex="0" aria-label="Top left">↖</div>
+            <div class="btn secondary hr-pos" data-x="0.5"  data-y="0.18" role="button" tabindex="0" aria-label="Top center">↑</div>
+            <div class="btn secondary hr-pos" data-x="0.82" data-y="0.18" role="button" tabindex="0" aria-label="Top right">↗</div>
+            <div class="btn secondary hr-pos" data-x="0.18" data-y="0.5"  role="button" tabindex="0" aria-label="Middle left">←</div>
+            <div class="btn secondary hr-pos active" data-x="0.5" data-y="0.5" role="button" tabindex="0" aria-label="Center">•</div>
+            <div class="btn secondary hr-pos" data-x="0.82" data-y="0.5"  role="button" tabindex="0" aria-label="Middle right">→</div>
+            <div class="btn secondary hr-pos" data-x="0.18" data-y="0.82" role="button" tabindex="0" aria-label="Bottom left">↙</div>
+            <div class="btn secondary hr-pos" data-x="0.5"  data-y="0.82" role="button" tabindex="0" aria-label="Bottom center">↓</div>
+            <div class="btn secondary hr-pos" data-x="0.82" data-y="0.82" role="button" tabindex="0" aria-label="Bottom right">↘</div>
           </div>
 
           <div class="card-title" style="margin-top:12px;">Size</div>
@@ -1121,7 +1144,7 @@ body {
           </div>
         </div>
 
-        <div class="card" style="margin-bottom:12px;">
+        <div class="card">
           <div class="card-title">Zoom <span style="opacity:.6;font-weight:400;">— animates at the playhead; set a Zoom point to push toward it</span></div>
           <div id="hr-zoom-target" class="hint-note" style="margin:8px 0 0;">Target: center</div>
           <div class="action-bar" style="margin-top:10px;">
@@ -1134,7 +1157,7 @@ body {
           </div>
         </div>
 
-        <div class="card" style="margin-bottom:12px;">
+        <div class="card">
           <div class="card-title">Highlight <span style="opacity:.6;font-weight:400;">— draw a Focus box above, then create</span></div>
           <div class="action-bar" style="margin-top:10px;">
             <div class="segmented compact" data-group="hr-hlstyle">
@@ -1150,11 +1173,11 @@ body {
             </div>
           </div>
           <div class="action-bar" style="margin-top:10px;">
-            <input id="hr-hlcolor" type="text" value="#f5f5f5" style="width:84px;" title="Outline color" />
-            <input id="hr-hldim" type="text" value="50" style="width:44px;" title="Dim outside %" />
-            <span style="font-size:11px;opacity:.6;">dim%</span>
-            <input id="hr-hlhold" type="text" value="90" style="width:44px;" title="Hold frames" />
-            <span style="font-size:11px;opacity:.6;">hold f</span>
+            <input id="hr-hlcolor" class="hr-input" type="text" value="#f5f5f5" style="width:92px;" aria-label="Outline color" title="Outline color" />
+            <input id="hr-hldim" class="hr-input" type="text" value="50" style="width:52px;" aria-label="Dim outside percent" title="Dim outside %" />
+            <span class="hr-input-lbl">dim %</span>
+            <input id="hr-hlhold" class="hr-input" type="text" value="90" style="width:52px;" aria-label="Hold duration in frames" title="Hold frames" />
+            <span class="hr-input-lbl">hold f</span>
             <span class="flex-spacer"></span>
             <div class="btn primary" id="hr-hlcreate" role="button" tabindex="0">Create highlight</div>
           </div>
