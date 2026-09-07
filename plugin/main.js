@@ -96,7 +96,7 @@ function showView(name) {
   $$(".view").forEach(v => v.classList.toggle("active", v.dataset.view === name));
   $$(".nav-item").forEach(n => n.classList.toggle("active", n.dataset.view === name));
   // Scope (Selected/Entire) only governs the cut passes — hide it where it's moot.
-  const noScope = name === "format" || name === "settings" || name === "review" || name === "flow" || name === "edit" || name === "motiongfx";
+  const noScope = name === "format" || name === "settings" || name === "review" || name === "flow" || name === "edit" || name === "motiongfx" || name === "headroom";
   const gb = $("#global-bar");
   if (gb) gb.classList.toggle("hidden", noScope);
   $("#content").scrollTop = 0;
@@ -2190,6 +2190,245 @@ const mgPickBtn = $("#mg-pick");
 if (mgPickBtn) mgPickBtn.addEventListener("click", () => withBusy(mgPickBtn, "Opening…", mgPick));
 const mgApplyBtn = $("#mg-apply");
 if (mgApplyBtn) mgApplyBtn.addEventListener("click", () => withBusy(mgApplyBtn, "Adding…", applyMotionGraphics));
+
+// ── Headroom: place + animate the talking head ───────────────────────────────
+// Moves the SELECTED clip with real Motion keyframes: position presets (3×3),
+// size, animated transitions (current state → target over a chosen duration,
+// Bezier-eased where the build allows), one-click zooms at the playhead, and
+// frame styles added as real effects via VideoFilterFactory. Everything is
+// feature-detected and wrapped in locked transactions, same as the reorder.
+const HR_INTERP_BEZIER = 2;   // kfInterpMode: 0 linear · 1 hold · 2 bezier (probed enum)
+
+function hrStatus(msg, isErr) {
+  const s = $("#hr-status");
+  if (!s) return;
+  s.textContent = msg || "";
+  s.classList.toggle("hidden", !msg);
+  s.classList.toggle("err", !!isErr);
+}
+
+// The selected clip on any video track — Headroom always works on a selection.
+async function hrSelectedClip(sequence) {
+  const CLIP = ppro.Constants?.TrackItemType?.Clip ?? 1;
+  let vCount = 1; try { vCount = await sequence.getVideoTrackCount(); } catch (_) {}
+  for (let vt = 0; vt < vCount; vt++) {
+    const trk = await sequence.getVideoTrack(vt).catch(() => null);
+    if (!trk) continue;
+    for (const it of (await trk.getTrackItems(CLIP, false) || [])) {
+      try { if (await it.getIsSelected()) return it; } catch (_) {}
+    }
+  }
+  throw new Error("Select your talking-head clip on the timeline first.");
+}
+
+// Motion params: Position = index 0, Scale = index 1 (same probe as AI Motion).
+async function hrMotionParams(clip) {
+  const chain = await clip.getComponentChain();
+  const n = await chain.getComponentCount();
+  for (let i = 0; i < n; i++) {
+    const c = await chain.getComponentAtIndex(i);
+    const mn = typeof c.getMatchName === "function" ? await c.getMatchName() : "";
+    if (/ADBE Motion/i.test(mn)) return { pos: await c.getParam(0), scale: await c.getParam(1), chain };
+  }
+  throw new Error("This clip has no Motion properties to animate.");
+}
+
+// Position values come back in whatever shape this build uses ([x,y], {x,y},
+// or wrapped). Read to a plain [x,y] and write back preserving that shape, so
+// we never guess the engine's format.
+function hrReadXY(v) {
+  if (Array.isArray(v) && v.length >= 2) return [Number(v[0]), Number(v[1])];
+  if (v && typeof v === "object") {
+    if ("x" in v && "y" in v) return [Number(v.x), Number(v.y)];
+    if ("value" in v) return hrReadXY(v.value);
+  }
+  return null;
+}
+function hrMakeXY(template, x, y) {
+  if (Array.isArray(template)) { const out = template.slice(); out[0] = x; out[1] = y; return out; }
+  if (template && typeof template === "object") {
+    if ("x" in template && "y" in template) return { ...template, x, y };
+    if ("value" in template) return { ...template, value: hrMakeXY(template.value, x, y) };
+  }
+  return [x, y];
+}
+
+async function hrCurrentValue(param) {
+  const kf = await param.getStartValue();
+  return kf ? kf.value : null;
+}
+
+// One keyframe, the shape this build honors (probed by AI Motion): create,
+// set .position, add. Optionally ease it afterwards — best-effort, motion
+// still lands linear on builds that reject the interpolation action.
+function hrAddKf(project, param, value, tt, ease) {
+  return project.lockedAccess(() => {
+    project.executeTransaction((c) => {
+      const kf = param.createKeyframe(value);
+      kf.position = tt;
+      c.addAction(param.createAddKeyframeAction(kf));
+      if (ease && typeof param.createSetInterpolationAtKeyframeAction === "function") {
+        try { c.addAction(param.createSetInterpolationAtKeyframeAction(tt, HR_INTERP_BEZIER, true)); } catch (_) {}
+      }
+    }, "FirstPass: Headroom keyframe");
+  });
+}
+
+function hrSetVarying(project, param, on) {
+  return project.lockedAccess(() => {
+    project.executeTransaction((c) => {
+      c.addAction(param.createSetTimeVaryingAction(on));
+    }, "FirstPass: Headroom vary");
+  });
+}
+
+// Animate one param from its current value to `target` over dur seconds
+// starting at the playhead (dur 0 = set statically).
+async function hrDrive(project, param, target, t0, dur) {
+  const mkTT = (s) => {
+    const v = Number(s);
+    if (!isFinite(v) || v < 0) throw new Error(`invalid time ${s}`);
+    return ppro.TickTime.createWithSeconds(Math.round(v * 1000) / 1000);
+  };
+  if (dur <= 0) {
+    await project.lockedAccess(() => {
+      project.executeTransaction((c) => {
+        try { c.addAction(param.createSetTimeVaryingAction(false)); } catch (_) {}
+        const kf = param.createKeyframe(target);
+        c.addAction(param.createSetValueAction(kf, true));
+      }, "FirstPass: Headroom place");
+    });
+    return;
+  }
+  const current = await hrCurrentValue(param);
+  await hrSetVarying(project, param, true);
+  await sleep(80);
+  if (current != null) await hrAddKf(project, param, current, mkTT(t0), true);
+  await sleep(80);
+  await hrAddKf(project, param, target, mkTT(t0 + dur), true);
+}
+
+function hrUiChoice() {
+  const posBtn = $("#hr-grid .hr-pos.active");
+  const size = $('.segmented[data-group="hr-size"] .seg.active');
+  const dur  = $('.segmented[data-group="hr-dur"] .seg.active');
+  return {
+    fx: posBtn ? Number(posBtn.dataset.x) : 0.5,
+    fy: posBtn ? Number(posBtn.dataset.y) : 0.5,
+    scalePct: size ? Number(size.dataset.val) : 33,
+    durSec: dur ? Number(dur.dataset.val) : 0.5,
+  };
+}
+
+async function hrApply() {
+  hrStatus("");
+  const project = await ppro.Project.getActiveProject();
+  const sequence = project && await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence — open your timeline.");
+  const clip = await hrSelectedClip(sequence);
+  const { pos, scale } = await hrMotionParams(clip);
+  const { fx, fy, scalePct, durSec } = hrUiChoice();
+
+  // Full = center at 100%; otherwise the chosen grid cell at the chosen size.
+  const wantFull = scalePct >= 100;
+  const tx = wantFull ? 0.5 : fx, ty = wantFull ? 0.5 : fy;
+
+  // Discover the position space from the clip's own current value: values ≤ 2
+  // mean normalized (0..1); anything bigger means sequence pixels.
+  const curPosRaw = await hrCurrentValue(pos);
+  const curXY = hrReadXY(curPosRaw);
+  if (!curXY) throw new Error("Couldn't read this clip's Position value.");
+  let px = tx, py = ty;
+  if (Math.abs(curXY[0]) > 2 || Math.abs(curXY[1]) > 2) {
+    const rect = await sequence.getFrameSize().catch(() => null);
+    if (!rect) throw new Error("Couldn't read the sequence frame size.");
+    px = tx * rect.width; py = ty * rect.height;
+  }
+  const posTarget = hrMakeXY(curPosRaw, px, py);
+
+  const playhead = await sequence.getPlayerPosition().catch(() => null);
+  const t0 = playhead ? playhead.seconds : 0;
+
+  await hrDrive(project, pos, posTarget, t0, durSec);
+  await sleep(100);
+  await hrDrive(project, scale, scalePct, t0, durSec);
+
+  toast(durSec > 0
+    ? `Moving there over ${durSec}s from the playhead. (Cmd+Z to undo.)`
+    : `Placed. (Cmd+Z to undo.)`);
+}
+
+async function hrZoom(targetPct) {
+  hrStatus("");
+  const project = await ppro.Project.getActiveProject();
+  const sequence = project && await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence — open your timeline.");
+  const clip = await hrSelectedClip(sequence);
+  const { scale } = await hrMotionParams(clip);
+  const { durSec } = hrUiChoice();
+  const playhead = await sequence.getPlayerPosition().catch(() => null);
+  const t0 = playhead ? playhead.seconds : 0;
+  await hrDrive(project, scale, targetPct, t0, Math.max(durSec, 0.3));
+  toast(`Zooming to ${targetPct}% at the playhead. (Cmd+Z to undo.)`);
+}
+
+// Frame styles = real effects appended to the clip's component chain. Effect
+// names vary by build, so we discover them from VideoFilterFactory and match
+// loosely; a miss reports what to look for instead of guessing.
+let hrFxCatalog = null;
+async function hrFxNames() {
+  const F = ppro.VideoFilterFactory;
+  if (!F || typeof F.createComponent !== "function")
+    throw new Error("This build doesn't expose effect creation to panels.");
+  if (!hrFxCatalog) {
+    const display = (await F.getDisplayNames().catch(() => null)) || [];
+    const match   = (await F.getMatchNames().catch(() => null)) || [];
+    hrFxCatalog = { display, match };
+  }
+  return hrFxCatalog;
+}
+
+async function hrAddEffect(re, label) {
+  hrStatus("");
+  const project = await ppro.Project.getActiveProject();
+  const sequence = project && await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence — open your timeline.");
+  const clip = await hrSelectedClip(sequence);
+  const { display, match } = await hrFxNames();
+
+  let name = null;
+  const di = display.findIndex((d) => re.test(d));
+  if (di >= 0 && match[di]) name = match[di];
+  if (!name) name = match.find((m) => re.test(m)) || null;
+  if (!name) throw new Error(`No "${label}" effect on this build.`);
+
+  const comp = await ppro.VideoFilterFactory.createComponent(name);
+  if (!comp) throw new Error(`Couldn't create the ${label} effect.`);
+  const chain = await clip.getComponentChain();
+  if (typeof chain.createAppendComponentAction !== "function")
+    throw new Error("This build can't append effects from a panel.");
+  await project.lockedAccess(() => {
+    project.executeTransaction((c) => {
+      c.addAction(chain.createAppendComponentAction(comp));
+    }, `FirstPass: add ${label}`);
+  });
+  toast(`${label} added — tune it in Effect Controls. (Cmd+Z to undo.)`);
+}
+
+$$("#hr-grid .hr-pos").forEach((b) => b.addEventListener("click", () => {
+  $$("#hr-grid .hr-pos").forEach((x) => x.classList.remove("active"));
+  b.classList.add("active");
+}));
+const hrApplyBtn = $("#hr-apply");
+if (hrApplyBtn) hrApplyBtn.addEventListener("click", () => withBusy(hrApplyBtn, "Moving…", hrApply));
+$$(".hr-zoom").forEach((b) => b.addEventListener("click", () =>
+  withBusy(b, "…", () => hrZoom(Number(b.dataset.scale)))));
+const hrShadowBtn = $("#hr-shadow");
+if (hrShadowBtn) hrShadowBtn.addEventListener("click", () =>
+  withBusy(hrShadowBtn, "Adding…", () => hrAddEffect(/drop shadow/i, "Drop shadow")));
+const hrRoundedBtn = $("#hr-rounded");
+if (hrRoundedBtn) hrRoundedBtn.addEventListener("click", () =>
+  withBusy(hrRoundedBtn, "Adding…", () => hrAddEffect(/rounded|round.*corner/i, "Rounded corners")));
 
 // ── AI Motion: keyframe engine (emphasis scale zoom) ─────────────
 // ADBE Motion, Scale = param index 1 (probed). We keyframe it. The exact
