@@ -2401,7 +2401,14 @@ async function hrDrive(project, param, target, t0, dur, kind) {
     });
     return;
   }
+  // Read what's on screen FIRST, then wipe the param clean (false→true is the
+  // same reset AI Motion uses). Every earlier attempt's keyframes — including
+  // broken ones — die here, so each move is exactly two keyframes: current at
+  // the playhead, target after it. Without this, stale keyframes from previous
+  // runs kept playing underneath each new move.
   const current = await hrValueAt(param, t0, kind);
+  await hrSetVarying(project, param, false);
+  await sleep(80);
   await hrSetVarying(project, param, true);
   await sleep(80);
   if (current != null) await hrAddKf(project, param, current, mkTT(t0), true);
