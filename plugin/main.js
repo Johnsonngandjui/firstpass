@@ -2208,18 +2208,22 @@ function hrStatus(msg, isErr) {
 }
 
 // The selected clip on any video track — Headroom always works on a selection.
-async function hrSelectedClip(sequence) {
+async function hrSelectedWithTrack(sequence) {
   const CLIP = ppro.Constants?.TrackItemType?.Clip ?? 1;
   let vCount = 1; try { vCount = await sequence.getVideoTrackCount(); } catch (_) {}
   for (let vt = 0; vt < vCount; vt++) {
     const trk = await sequence.getVideoTrack(vt).catch(() => null);
     if (!trk) continue;
     for (const it of (await trk.getTrackItems(CLIP, false) || [])) {
-      try { if (await it.getIsSelected()) return it; } catch (_) {}
+      try { if (await it.getIsSelected()) return { clip: it, trackIdx: vt }; } catch (_) {}
     }
   }
   throw new Error("Select your talking-head clip on the timeline first.");
 }
+async function hrSelectedClip(sequence) { return (await hrSelectedWithTrack(sequence)).clip; }
+
+// Our own rendered overlays must never become the preview background.
+const HR_OVERLAY_RE = /sample-graphics|graphics\/out|firstpass/i;
 
 // Motion params: Position = index 0, Scale = index 1 (same probe as AI Motion).
 // Motion params by DISPLAY NAME. Premiere 2026's Motion component carries
@@ -2311,8 +2315,9 @@ async function hrValueAt(param, tSec, kind) {
   }
   if (v == null && kind === "scale") v = 100;
   if (v == null && kind === "pct") v = 0;    // untouched crop is zero
-  // An untouched clip sits centered; normalized is this build's proven space.
-  if (v == null && kind === "pos") v = [0.5, 0.5];
+  // "pos" returns null when unreadable — the caller supplies the center in the
+  // correct space (this build's Position API is SEQUENCE PIXELS; the reference
+  // ECP shows 960,540 and fraction writes land clips in the corner).
   return v;
 }
 
@@ -2408,7 +2413,7 @@ function hrSetVarying(project, param, on) {
 
 // Animate one param from its current value to `target` over dur seconds
 // starting at the playhead (dur 0 = set statically).
-async function hrDrive(project, param, target, t0, dur, kind) {
+async function hrDrive(project, param, target, t0, dur, kind, currentOverride) {
   const mkTT = (s) => {
     const v = Number(s);
     if (!isFinite(v) || v < 0) throw new Error(`invalid time ${s}`);
@@ -2430,7 +2435,8 @@ async function hrDrive(project, param, target, t0, dur, kind) {
   // broken ones — die here, so each move is exactly two keyframes: current at
   // the playhead, target after it. Without this, stale keyframes from previous
   // runs kept playing underneath each new move.
-  const current = await hrValueAt(param, t0, kind);
+  const current = currentOverride !== undefined ? currentOverride
+                : await hrValueAt(param, t0, kind);
   await hrSetVarying(project, param, false);
   await sleep(80);
   await hrSetVarying(project, param, true);
@@ -2525,12 +2531,13 @@ async function hrApplyInner(P) {
   const { pos, scale, crop } = await hrMotionParams(clip);
   let { fx, fy, scalePct, durSec } = hrUiChoice();
 
-  // A dragged Destination box beats the grid: its center is the position, its
-  // height fraction is the scale (a full-frame source at S% is S% tall).
-  if (hrMode() === "dest" && hrBox) {
+  // The live box IS the final result: its center is the position; scale is
+  // derived so the CROPPED region fills the box exactly (box.h = s·shapeH).
+  const { w: shpW, h: shpH } = hrShapeChoice();
+  if (hrBox) {
     fx = hrBox.x + hrBox.w / 2;
     fy = hrBox.y + hrBox.h / 2;
-    scalePct = Math.max(5, Math.round(hrBox.h * 100));
+    scalePct = Math.max(5, Math.round(hrBox.h * 10000 / shpH));
   }
 
   // Full = center at 100%; otherwise the chosen cell/box at the chosen size.
@@ -2543,22 +2550,24 @@ async function hrApplyInner(P) {
   const { t0, dur } = await hrClipTimes(clip, sequence, durSec);
   const effDur = durSec > 0 ? Math.max(0.1, dur) : 0;
 
-  // Discover the position space from the clip's own current value: values ≤ 2
-  // mean normalized (0..1); anything bigger means sequence pixels.
+  // Position space is SEQUENCE PIXELS on this build (reference ECP: 960,540;
+  // fraction writes provably land in the corner). Only a SANE read with both
+  // values ≤ 2 proves a normalized build. Unreadable current ⇒ pixel center.
   P.v = "read Position value";
+  const rect = await sequence.getFrameSize().catch(() => null);
+  if (!rect) throw new Error("Couldn't read the sequence frame size.");
   const curPosRaw = await hrValueAt(pos, t0, "pos");
-  const curXY = hrReadXY(curPosRaw);
-  if (!curXY) throw new Error("Couldn't read this clip's Position value.");
-  let px = tx, py = ty;
-  if (Math.abs(curXY[0]) > 2 || Math.abs(curXY[1]) > 2) {
-    const rect = await sequence.getFrameSize().catch(() => null);
-    if (!rect) throw new Error("Couldn't read the sequence frame size.");
-    px = tx * rect.width; py = ty * rect.height;
-  }
-  const posTarget = hrMakeXY(curPosRaw, px, py);
+  let curXY = hrReadXY(curPosRaw);
+  const norm = !!(curXY && Math.abs(curXY[0]) <= 2 && Math.abs(curXY[1]) <= 2);
+  const toSpace = (fxx, fyy) => norm ? [fxx, fyy] : [fxx * rect.width, fyy * rect.height];
+  if (!curXY) curXY = toSpace(0.5, 0.5);
+  const tpl = curPosRaw != null ? curPosRaw : curXY;
+  const [pxv, pyv] = toSpace(tx, ty);
+  const posTarget = hrMakeXY(tpl, pxv, pyv);
+  const posCurrent = hrMakeXY(tpl, curXY[0], curXY[1]);
 
   P.v = "write Position";
-  await hrDrive(project, pos, posTarget, t0, effDur, "pos");
+  await hrDrive(project, pos, posTarget, t0, effDur, "pos", posCurrent);
   await sleep(100);
   P.v = "write Scale";
   await hrDrive(project, scale, scalePct, t0, effDur, "scale");
@@ -2611,33 +2620,26 @@ async function hrZoom(targetPct) {
   // With a Zoom point set, push TOWARD it: scale to S while moving Position so
   // the clicked point lands centered — pos_end = C − (P − C)·S, same space as
   // the clip's own Position value (normalized or pixels, discovered live).
+  const rect = await sequence.getFrameSize().catch(() => null);
+  if (!rect) throw new Error("Couldn't read the sequence frame size.");
+  const curPosRaw = await hrValueAt(pos, t0, "pos");
+  let curXY = hrReadXY(curPosRaw);
+  const norm = !!(curXY && Math.abs(curXY[0]) <= 2 && Math.abs(curXY[1]) <= 2);
+  const cx = norm ? 0.5 : rect.width / 2, cy = norm ? 0.5 : rect.height / 2;
+  if (!curXY) curXY = [cx, cy];
+  const tpl = curPosRaw != null ? curPosRaw : curXY;
+  const posCurrent = hrMakeXY(tpl, curXY[0], curXY[1]);
   if (hrPoint && targetPct > 100) {
     const S = targetPct / 100;
-    const curPosRaw = await hrValueAt(pos, t0, "pos");
-    const curXY = hrReadXY(curPosRaw);
-    if (curXY) {
-      let cx = 0.5, cy = 0.5, px = hrPoint.x, py = hrPoint.y;
-      if (Math.abs(curXY[0]) > 2 || Math.abs(curXY[1]) > 2) {
-        const rect = await sequence.getFrameSize().catch(() => null);
-        if (rect) { cx = rect.width / 2; cy = rect.height / 2; px = hrPoint.x * rect.width; py = hrPoint.y * rect.height; }
-      }
-      const target = hrMakeXY(curPosRaw, cx - (px - cx) * S, cy - (py - cy) * S);
-      await hrDrive(project, pos, target, t0, dur, "pos");
-      await sleep(100);
-    }
+    const px = norm ? hrPoint.x : hrPoint.x * rect.width;
+    const py = norm ? hrPoint.y : hrPoint.y * rect.height;
+    const target = hrMakeXY(tpl, cx - (px - cx) * S, cy - (py - cy) * S);
+    await hrDrive(project, pos, target, t0, dur, "pos", posCurrent);
+    await sleep(100);
   } else if (targetPct <= 100) {
     // Reset also brings the frame back to center.
-    const curPosRaw = await hrValueAt(pos, t0, "pos");
-    const curXY = hrReadXY(curPosRaw);
-    if (curXY) {
-      let cx = 0.5, cy = 0.5;
-      if (Math.abs(curXY[0]) > 2 || Math.abs(curXY[1]) > 2) {
-        const rect = await sequence.getFrameSize().catch(() => null);
-        if (rect) { cx = rect.width / 2; cy = rect.height / 2; }
-      }
-      await hrDrive(project, pos, hrMakeXY(curPosRaw, cx, cy), t0, dur, "pos");
-      await sleep(100);
-    }
+    await hrDrive(project, pos, hrMakeXY(tpl, cx, cy), t0, dur, "pos", posCurrent);
+    await sleep(100);
   }
   await hrDrive(project, scale, targetPct, t0, dur, "scale");
   toast(hrPoint && targetPct > 100
@@ -2733,12 +2735,15 @@ async function hrRefreshFrame() {
   try { sel = await hrSelectedClip(sequence); } catch (_) {}
   const selMeta = sel ? await hrClipMeta(sel, t) : null;
 
-  // scene = lowest-track clip at the playhead that isn't the selection
+  // scene = what's BEHIND the selection: lowest clip on a LOWER track at the
+  // playhead (our rendered overlays excluded). Nothing below ⇒ the sequence
+  // background truly is black, so show black — never the clip itself.
   const CLIP = ppro.Constants?.TrackItemType?.Clip ?? 1;
+  let selIdx = Infinity;
+  try { selIdx = sel ? (await hrSelectedWithTrack(sequence)).trackIdx : Infinity; } catch (_) {}
   let bgMeta = null;
-  let vCount = 1; try { vCount = await sequence.getVideoTrackCount(); } catch (_) {}
   outer:
-  for (let vt = 0; vt < vCount; vt++) {
+  for (let vt = 0; vt < Math.min(selIdx, 99); vt++) {
     const trk = await sequence.getVideoTrack(vt).catch(() => null);
     if (!trk) continue;
     for (const it of (await trk.getTrackItems(CLIP, false) || [])) {
@@ -2747,15 +2752,21 @@ async function hrRefreshFrame() {
       try { const d = await it.getDuration();  du = d ? d.seconds : 0; } catch (_) {}
       if (t < st || t >= st + du) continue;
       const m = await hrClipMeta(it, t);
-      if (!m.mp) continue;
-      if (selMeta && m.mp === selMeta.mp && Math.abs(m.st - selMeta.st) < 0.01) continue;
+      if (!m.mp || HR_OVERLAY_RE.test(m.mp)) continue;
       bgMeta = m; break outer;
     }
   }
 
   if (!bgMeta && !selMeta) throw new Error("No clips under the playhead.");
-  const bg = bgMeta || selMeta;                       // single-clip timeline: it IS the scene
-  $("#hr-frame").src = await hrGrab(bg.mp, bg.srcTime);
+  const rectAR = await sequence.getFrameSize().catch(() => null);
+  if (bgMeta) {
+    $("#hr-frame").src = await hrGrab(bgMeta.mp, bgMeta.srcTime);
+  } else {
+    const cv = document.createElement("canvas");
+    cv.width = 640; cv.height = rectAR ? Math.round(640 * rectAR.height / rectAR.width) : 360;
+    const g = cv.getContext("2d"); g.fillStyle = "#000"; g.fillRect(0, 0, cv.width, cv.height);
+    $("#hr-frame").src = cv.toDataURL("image/png");
+  }
   $("#hr-frame-wrap").style.display = "block";
 
   const boxImg = $("#hr-box-img");
@@ -2779,12 +2790,11 @@ async function hrRefreshFrame() {
     try {
       const { pos, scale } = await hrMotionParams(sel);
       const { t0 } = await hrClipTimes(sel, sequence, 0);
-      const xy = hrReadXY(await hrValueAt(pos, t0, "pos")) || [0.5, 0.5];
-      let cx = xy[0], cy = xy[1];
-      if (Math.abs(cx) > 2 || Math.abs(cy) > 2) {
-        const rect = await sequence.getFrameSize().catch(() => null);
-        if (rect) { cx = cx / rect.width; cy = cy / rect.height; }
-      }
+      const rect = await sequence.getFrameSize().catch(() => null);
+      const xy = hrReadXY(await hrValueAt(pos, t0, "pos"));
+      let cx = 0.5, cy = 0.5;
+      if (xy && Math.abs(xy[0]) <= 2 && Math.abs(xy[1]) <= 2) { cx = xy[0]; cy = xy[1]; }
+      else if (xy && rect) { cx = xy[0] / rect.width; cy = xy[1] / rect.height; }
       const s = Math.max(0.05, Math.min(1.5, (await hrValueAt(scale, t0, "scale")) / 100));
       hrBox = { x: Math.max(0, cx - s / 2), y: Math.max(0, cy - s / 2),
                 w: Math.min(1, s), h: Math.min(1, s) };
@@ -2814,6 +2824,18 @@ function hrRenderOverlays() {
     box.style.display = "block";
     box.style.left = (hrBox.x * W) + "px";  box.style.top = (hrBox.y * H) + "px";
     box.style.width = (hrBox.w * W) + "px"; box.style.height = (hrBox.h * H) + "px";
+    // the box frames the CROPPED region: oversize the thumb so only the
+    // central shapeW×shapeH slice shows — preview IS the final composite
+    const { w: sw, h: sh } = hrShapeChoice();
+    const img = $("#hr-box-img");
+    if (img) {
+      img.style.width = (10000 / sw) + "%";
+      img.style.height = (10000 / sh) + "%";
+      img.style.left = "50%"; img.style.top = "50%";
+      img.style.transform = "translate(-50%,-50%)";
+      img.style.maxWidth = "none";
+    }
+    box.style.overflow = "hidden";
   } else box.style.display = "none";
   if (hrPoint) {
     pt.style.display = "block";
@@ -2952,13 +2974,48 @@ async function hrCreateHighlight() {
 $$("#hr-grid .hr-pos").forEach((b) => b.addEventListener("click", () => {
   $$("#hr-grid .hr-pos").forEach((x) => x.classList.remove("active"));
   b.classList.add("active");
+  if (hrBox) {
+    hrBox.x = Math.max(0, Math.min(1 - hrBox.w, Number(b.dataset.x) - hrBox.w / 2));
+    hrBox.y = Math.max(0, Math.min(1 - hrBox.h, Number(b.dataset.y) - hrBox.h / 2));
+    hrRenderOverlays();
+  }
 }));
+// WYSIWYG: every control below reshapes the LIVE box; Move it just commits it.
+function hrBoxCenter() {
+  return hrBox ? { x: hrBox.x + hrBox.w / 2, y: hrBox.y + hrBox.h / 2 } : { x: 0.5, y: 0.5 };
+}
+function hrSetBoxAspect() {          // width follows shape aspect, height rules
+  if (!hrBox) return;
+  const { w: sw, h: sh } = hrShapeChoice();
+  const c = hrBoxCenter();
+  hrBox.w = Math.min(1, hrBox.h * (sw / sh));
+  hrBox.x = Math.max(0, Math.min(1 - hrBox.w, c.x - hrBox.w / 2));
+  hrBox.y = Math.max(0, Math.min(1 - hrBox.h, c.y - hrBox.h / 2));
+}
 $$(".hr-shape").forEach((b) => b.addEventListener("click", () => {
   $$(".hr-shape").forEach((x) => x.classList.remove("active"));
   b.classList.add("active");
   const w = $("#hr-shape-w"), h = $("#hr-shape-h");
   if (w) w.value = b.dataset.w;
   if (h) h.value = b.dataset.h;
+  if (!hrBox) hrBox = { x: 0.35, y: 0.3, w: 0.3, h: 0.3 };
+  if (Number(b.dataset.w) === 100 && Number(b.dataset.h) === 100 && b.textContent.trim() === "Full") {
+    hrBox = { x: 0, y: 0, w: 1, h: 1 };
+  }
+  hrSetBoxAspect(); hrRenderOverlays();
+}));
+["hr-shape-w", "hr-shape-h"].forEach((id) => {
+  const el = $("#" + id);
+  if (el) el.addEventListener("input", () => { hrSetBoxAspect(); hrRenderOverlays(); });
+});
+$$('.segmented[data-group="hr-size"] .seg').forEach((sg) => sg.addEventListener("click", () => {
+  const pct = Number(sg.dataset.val) / 100;
+  if (!hrBox) hrBox = { x: 0.35, y: 0.3, w: 0.3, h: 0.3 };
+  const c = hrBoxCenter();
+  hrBox.h = Math.min(1, pct);
+  if (pct >= 1) { hrBox = { x: 0, y: 0, w: 1, h: 1 }; }
+  else { hrBox.y = Math.max(0, Math.min(1 - hrBox.h, c.y - hrBox.h / 2)); }
+  hrSetBoxAspect(); hrRenderOverlays();
 }));
 const hrApplyBtn = $("#hr-apply");
 if (hrApplyBtn) hrApplyBtn.addEventListener("click", () => withBusy(hrApplyBtn, "Moving…", hrApply));
