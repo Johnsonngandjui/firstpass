@@ -1127,10 +1127,14 @@ section[data-view="headroom"] .card { gap: 12px; }
             <div class="hr-col grow">
               <div class="hr-lbl">Shape</div>
               <div class="hr-shapes">
-                <div class="btn secondary hr-shape active" data-w="100" data-h="100" role="button" tabindex="0">Full</div>
-                <div class="btn secondary hr-shape" data-w="58" data-h="100" role="button" tabindex="0">Portrait</div>
-                <div class="btn secondary hr-shape" data-w="100" data-h="62" role="button" tabindex="0">Wide</div>
-                <div class="btn secondary" aria-disabled="true" title="Premiere doesn't expose masks to panels — draw an ellipse mask in Effect Controls" role="button" tabindex="0">Circle</div>
+                <div class="btn secondary hr-shape active" data-mode="full" data-w="100" data-h="100" role="button" tabindex="0">Full</div>
+                <div class="btn secondary hr-shape" data-mode="portrait" data-w="58" data-h="100" role="button" tabindex="0">Portrait</div>
+                <div class="btn secondary hr-shape" data-mode="wide" data-w="100" data-h="62" role="button" tabindex="0">Wide</div>
+                <div class="btn secondary hr-shape" data-mode="circle" role="button" tabindex="0" title="Square crop + circular matte, applied with Move it">Circle</div>
+              </div>
+              <div class="action-bar">
+                <input id="hr-radius" class="hr-input" type="text" value="60" style="width:52px;" aria-label="Corner radius in pixels" title="Corner radius (px) — 0 for sharp" />
+                <span class="hr-input-lbl">corner radius px · applied on Move it</span>
               </div>
               <div class="action-bar">
                 <input id="hr-shape-w" class="hr-input" type="text" value="100" style="width:52px;" aria-label="Crop width percent" title="Width %" />
@@ -1220,9 +1224,7 @@ section[data-view="headroom"] .card { gap: 12px; }
           <div class="card-title">Frame style</div>
           <div class="action-bar" style="margin-top:10px;">
             <div class="btn secondary" id="hr-shadow" role="button" tabindex="0">Add shadow</div>
-            <input id="hr-radius" class="hr-input" type="text" value="60" style="width:52px;" aria-label="Corner radius in pixels" title="Corner radius (px)" />
-            <span class="hr-input-lbl">radius px</span>
-            <div class="btn secondary" id="hr-round" role="button" tabindex="0">Round edges</div>
+            
             <span class="flex-spacer"></span>
           </div>
         </div>

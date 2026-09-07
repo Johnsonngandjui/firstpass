@@ -2573,6 +2573,8 @@ async function hrApplyInner(P) {
   // Keyframe positions live in CLIP SOURCE time, not sequence time (the same
   // convention AI Motion's engine uses) — convert the playhead accordingly.
   P.v = "map playhead to clip time";
+  const phSeq = await sequence.getPlayerPosition().catch(() => null);
+  const seqT = phSeq ? phSeq.seconds : 0;
   const { t0, dur } = await hrClipTimes(clip, sequence, durSec);
   const effDur = durSec > 0 ? Math.max(0.1, dur) : 0;
 
@@ -2627,9 +2629,21 @@ async function hrApplyInner(P) {
   } catch (_) {}
   const verified = landed == null ? "" :
     (Math.abs(landed - scalePct) <= 2 ? " ✓" : ` — warning: scale reads ${landed}%`);
+
+  // rounding/circle rides the same click — matte starts where the move lands
+  P.v = "matte";
+  let matteNote = "";
+  if (hrBox && (hrShapeMode === "circle" || hrRadiusPx() > 0)) {
+    try {
+      const m = await hrApplyMatte(seqT + effDur);
+      if (m) matteNote = m.popupSet
+        ? (hrShapeMode === "circle" ? ` · circled (matte V${m.track + 1})` : ` · corners rounded (matte V${m.track + 1})`)
+        : ` · matte on V${m.track + 1} — set Track Matte Key ▸ Matte to it`;
+    } catch (e) { matteNote = ` · rounding skipped: ${e.message}`; }
+  }
   toast((effDur > 0
     ? `Moving there over ${effDur.toFixed(1)}s from the playhead${verified}.`
-    : `Placed${verified}.`) + " (Cmd+Z to undo.)");
+    : `Placed${verified}.`) + matteNote + " (Cmd+Z to undo.)");
 }
 
 async function hrZoom(targetPct) {
@@ -2796,7 +2810,7 @@ async function hrRefreshFrame() {
     frameImg.style.display = "none";
     wrapEl.style.background = "#000";
   }
-  if (rectAR) hrSeqAR = rectAR.height / rectAR.width;
+  if (rectAR) { hrSeqAR = rectAR.height / rectAR.width; hrSeqW = rectAR.width; }
   wrapEl.style.display = "block";
 
   const boxImg = $("#hr-box-img");
@@ -2847,6 +2861,7 @@ function hrSyncMode() {
 }
 
 let hrSeqAR = 9 / 16;                       // sequence height/width, set on refresh
+let hrSeqW = 3840;                          // sequence pixel width, set on refresh
 function hrRenderOverlays() {
   const wrap = $("#hr-frame-wrap"), box = $("#hr-box"), pt = $("#hr-point");
   if (!wrap || !box || !pt) return;
@@ -2873,6 +2888,9 @@ function hrRenderOverlays() {
       img.style.maxWidth = "none";
     }
     box.style.overflow = "hidden";
+    const scalePreview = W / (hrSeqW || 3840);
+    box.style.borderRadius = hrShapeMode === "circle"
+      ? "50%" : Math.round(hrRadiusPx() * scalePreview) + "px";
   } else box.style.display = "none";
   if (hrPoint) {
     pt.style.display = "block";
@@ -2968,10 +2986,11 @@ async function hrPlaceFile(path, durSec, startSec) {
 // UXP exposes no masks, so the pro route: the helper renders a matte matching
 // the live box, it lands on a new top track spanning the clip's remainder, and
 // a Track Matte Key on the clip keys through it (default Matte Alpha).
-async function hrRoundEdges() {
-  hrStatus("");
-  const layout = hrLayoutFromBox();
-  if (!hrBox || !layout) throw new Error("Refresh the frame and set the box first — the matte matches it exactly.");
+async function hrApplyMatte(startSeqOpt) {
+  if (!hrBox) throw new Error("no box");
+  const circle = hrShapeMode === "circle";
+  const radius = circle ? 999999 : hrRadiusPx();
+  if (!circle && radius <= 0) return null;
   const project = await ppro.Project.getActiveProject();
   const sequence = project && await project.getActiveSequence();
   if (!sequence) throw new Error("No active sequence — open your timeline.");
@@ -2982,13 +3001,12 @@ async function hrRoundEdges() {
   let st = 0, du = 0;
   try { const v = await clip.getStartTime(); st = v ? v.seconds : 0; } catch (_) {}
   try { const v = await clip.getDuration();  du = v ? v.seconds : 0; } catch (_) {}
-  const playhead = await sequence.getPlayerPosition().catch(() => null);
-  let t = playhead ? playhead.seconds : st;
+  let t = startSeqOpt;
+  if (t == null) { const ph = await sequence.getPlayerPosition().catch(() => null); t = ph ? ph.seconds : st; }
   t = Math.max(st, Math.min(t, st + Math.max(0.2, du) - 0.1));
   const matteDur = Math.max(0.5, st + du - t);
-  const radius = Math.max(4, Number($("#hr-radius")?.value) || 60);
 
-  overlayShow("Rounding the corners");
+  overlayShow(circle ? "Cutting the circle" : "Rounding the corners");
   overlayProgress(15, "Rendering the matte…", "");
   let data;
   try {
@@ -3050,11 +3068,10 @@ async function hrRoundEdges() {
     }
   } catch (err) {
     overlayHide();
-    toast(`Matte placed on V${matteTrack + 1} — set the clip's Track Matte Key "Matte" dropdown to it. (${err.message})`, true);
-    return;
+    return { track: matteTrack, popupSet: false };
   }
   overlayHide();
-  toast(`Corners rounded via matte on V${matteTrack + 1}. If they aren't, set the Track Matte Key "Matte" dropdown to Video ${matteTrack + 1}. (Cmd+Z ×2 undoes.)`);
+  return { track: matteTrack, popupSet: true };
 }
 
 async function hrCreateHighlight() {
@@ -3115,24 +3132,30 @@ $$("#hr-grid .hr-pos").forEach((b) => b.addEventListener("click", () => {
 function hrBoxCenter() {
   return hrBox ? { x: hrBox.x + hrBox.w / 2, y: hrBox.y + hrBox.h / 2 } : { x: 0.5, y: 0.5 };
 }
+let hrShapeMode = "full";            // full | portrait | wide | circle | free
+function hrRadiusPx() { return Math.max(0, Number($("#hr-radius")?.value) || 0); }
 function hrSetBoxAspect() {          // width follows shape aspect, height rules
   if (!hrBox) return;
-  const { w: sw, h: sh } = hrShapeChoice();
   const c = hrBoxCenter();
-  hrBox.w = Math.min(1, hrBox.h * (sw / sh));
+  if (hrShapeMode === "circle") {
+    // a circle needs a PIXEL-square box: fraction width = height × (H/W)
+    hrBox.w = Math.min(1, hrBox.h * hrSeqAR);
+  } else {
+    const { w: sw, h: sh } = hrShapeChoice();
+    hrBox.w = Math.min(1, hrBox.h * (sw / sh));
+  }
   hrBox.x = Math.max(0, Math.min(1 - hrBox.w, c.x - hrBox.w / 2));
   hrBox.y = Math.max(0, Math.min(1 - hrBox.h, c.y - hrBox.h / 2));
 }
 $$(".hr-shape").forEach((b) => b.addEventListener("click", () => {
   $$(".hr-shape").forEach((x) => x.classList.remove("active"));
   b.classList.add("active");
+  hrShapeMode = b.dataset.mode || "free";
   const w = $("#hr-shape-w"), h = $("#hr-shape-h");
-  if (w) w.value = b.dataset.w;
-  if (h) h.value = b.dataset.h;
+  if (b.dataset.w && w) w.value = b.dataset.w;
+  if (b.dataset.h && h) h.value = b.dataset.h;
   if (!hrBox) hrBox = { x: 0.35, y: 0.3, w: 0.3, h: 0.3 };
-  if (Number(b.dataset.w) === 100 && Number(b.dataset.h) === 100 && b.textContent.trim() === "Full") {
-    hrBox = { x: 0, y: 0, w: 1, h: 1 };
-  }
+  if (hrShapeMode === "full") hrBox = { x: 0, y: 0, w: 1, h: 1 };
   hrSetBoxAspect(); hrRenderOverlays();
 }));
 ["hr-shape-w", "hr-shape-h"].forEach((id) => {
@@ -3155,8 +3178,7 @@ $$(".hr-zoom").forEach((b) => b.addEventListener("click", () =>
 const hrShadowBtn = $("#hr-shadow");
 if (hrShadowBtn) hrShadowBtn.addEventListener("click", () =>
   withBusy(hrShadowBtn, "Adding…", () => hrAddEffect(/drop shadow/i, "Drop shadow")));
-const hrRoundBtn = $("#hr-round");
-if (hrRoundBtn) hrRoundBtn.addEventListener("click", () => withBusy(hrRoundBtn, "Rounding…", hrRoundEdges));
+
 const hrRefreshBtn = $("#hr-refresh");
 if (hrRefreshBtn) hrRefreshBtn.addEventListener("click", () => withBusy(hrRefreshBtn, "Grabbing…", hrRefreshFrame));
 $$('.segmented[data-group="hr-mode"] .seg').forEach((s) =>
