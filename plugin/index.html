@@ -217,6 +217,9 @@ section[data-view="headroom"] .card-title { margin-bottom: 2px; }
 .hr-fields .hr-input { width: 100%; }
 /* The one primary action per card is a full-width target (Fitts). */
 #hr-apply { flex: 1 1 auto; text-align: center; }
+/* Zoom amounts share rows evenly — equal px bases (UXP ignores %), no
+   spacer, so wrapping fills each row edge to edge instead of leaving holes. */
+.hr-zooms .hr-zoom { flex: 1 1 96px; text-align: center; }
 .hr-shapes { display: flex; flex-wrap: wrap; gap: 8px; }
 .hr-shapes .hr-shape { flex: 1 1 60px; }   /* px basis (UXP ignores %) → one row of four, wraps 2+2 when narrow */
 .hr-shape, .hr-shapes .btn { min-height: 46px; }
@@ -859,7 +862,7 @@ section[data-view="headroom"] .card { gap: 12px; }
       </nav>
 
       <div class="sidebar-foot">
-        <span class="version">v1.1.0 · b0907k</span>
+        <span class="version">v1.1.0 · b0907l</span>
       </div>
     </aside>
 
@@ -1112,7 +1115,7 @@ section[data-view="headroom"] .card { gap: 12px; }
 
         <div class="card">
           <div id="hr-clipinfo" class="hint-note" style="display:none;margin:0;"></div>
-          <div class="card-title">Frame picker <span style="opacity:.6;font-weight:400;">— preview destination · drag inside to move · drag the handle to resize</span></div>
+          <div class="card-title">Frame picker <span id="hr-picker-sub" style="opacity:.6;font-weight:400;">— preview destination · drag inside to move · drag the handle to resize</span></div>
           <div class="action-bar">
             <div class="segmented compact" data-group="hr-mode">
               <div class="seg active" data-val="dest" role="button" tabindex="0">Destination</div>
@@ -1193,12 +1196,11 @@ section[data-view="headroom"] .card { gap: 12px; }
         <div class="card hidden" id="hr-card-zoom">
           <div class="card-title">Zoom <span style="opacity:.6;font-weight:400;">— click the frame above to aim, then pick an amount</span></div>
           <div id="hr-zoom-target" class="hint-note" style="margin:0;">Target: center</div>
-          <div class="action-bar">
+          <div class="action-bar hr-zooms">
             <div class="btn secondary hr-zoom" data-scale="115" role="button" tabindex="0">115%</div>
             <div class="btn secondary hr-zoom" data-scale="130" role="button" tabindex="0">130%</div>
             <div class="btn secondary hr-zoom" data-scale="150" role="button" tabindex="0">150%</div>
             <div class="btn secondary hr-zoom" data-scale="200" role="button" tabindex="0">200%</div>
-            <span class="flex-spacer"></span>
             <div class="btn secondary hr-zoom" data-scale="100" role="button" tabindex="0">Reset 100%</div>
           </div>
           <div class="hr-lbl">Speed</div>

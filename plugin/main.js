@@ -3007,6 +3007,11 @@ function hrSyncMode() {
     mode === "zoom"  ? "Refresh, then click the point you want to zoom toward." :
     mode === "focus" ? "Refresh, then drag a box around what to highlight." :
                        "Refresh, then drag the clip where it should go.";
+  const sub = $("#hr-picker-sub");
+  if (sub) sub.textContent =
+    mode === "zoom"  ? "— click the point to zoom toward" :
+    mode === "focus" ? "— drag a box around what to highlight" :
+                       "— preview destination · drag inside to move · drag the handle to resize";
   hrRenderOverlays();
 }
 
