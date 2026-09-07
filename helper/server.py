@@ -90,6 +90,15 @@ class RenderMatteRequest(BaseModel):
     width:        int   = 3840
     height:       int   = 2160
     duration_sec: float = 10.0
+    # Optional transition: when start_* are present the matte renders as an
+    # ANIMATED ProRes 4444 clip morphing start→end over duration_sec, easing
+    # with smoothstep (≈ the panel's bezier move). Otherwise: still PNG.
+    start_x:         Optional[float] = None
+    start_y:         Optional[float] = None
+    start_w:         Optional[float] = None
+    start_h:         Optional[float] = None
+    start_radius_px: Optional[float] = None
+    fps:             float = 30.0
 
 class RenderHighlightRequest(BaseModel):
     # focus box, as fractions of the frame
@@ -282,25 +291,80 @@ def _write_rounded_matte_png(path: Path, W: int, H: int,
     path.write_bytes(png)
 
 
+def _matte_alpha_np(W: int, H: int, bx: float, by: float, bw: float, bh: float, r: float):
+    """Rounded-rect alpha as a uint8 HxW array — signed-distance field,
+    vectorized (numpy), antialiased edge. Same shape math as the PNG writer."""
+    import numpy as np
+    r = max(0.0, min(r, bw / 2, bh / 2))
+    cx, cy = bx + bw / 2, by + bh / 2
+    hx, hy = max(0.0, bw / 2 - r), max(0.0, bh / 2 - r)
+    dx = np.maximum(np.abs(np.arange(W, dtype=np.float32) + 0.5 - cx) - hx, 0.0)[None, :]
+    dy = np.maximum(np.abs(np.arange(H, dtype=np.float32) + 0.5 - cy) - hy, 0.0)[:, None]
+    d = np.sqrt(dx * dx + dy * dy)
+    return np.clip((r + 0.5 - d) * 255.0, 0.0, 255.0).astype(np.uint8)
+
+
+def _render_matte_move(path: Path, W: int, H: int, start, end, dur: float, fps: float) -> None:
+    """Animated matte: white rounded rect morphing start→end, straight-alpha
+    ProRes 4444 (yuva444p10le — the load-bearing flag), rawvideo piped in so
+    no intermediate frames touch disk. start/end = (bx, by, bw, bh, r) px."""
+    import numpy as np
+    n = max(2, int(round(dur * fps)))
+    cmd = [FFMPEG, "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{W}x{H}",
+           "-r", str(fps), "-i", "-",
+           "-c:v", "prores_ks", "-profile:v", "4444", "-pix_fmt", "yuva444p10le",
+           str(path)]
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    frame = np.empty((H, W, 4), dtype=np.uint8)
+    frame[..., 0:3] = 255                      # straight alpha: RGB stays white
+    try:
+        for i in range(n):
+            t = i / (n - 1)
+            t = t * t * (3 - 2 * t)            # smoothstep ≈ the move's bezier ease
+            g = [a + (b - a) * t for a, b in zip(start, end)]
+            frame[..., 3] = _matte_alpha_np(W, H, *g)
+            p.stdin.write(frame.tobytes())
+    finally:
+        p.stdin.close()
+    if p.wait() != 0:
+        raise RuntimeError("ffmpeg matte encode failed")
+
+
 @app.post("/render_matte")
 def render_matte(req: RenderMatteRequest):
     """Rounded-rect alpha matte for Headroom's Track Matte Key rounding —
-    a still PNG looped into ProRes 4444 for the clip's remaining duration."""
+    a still PNG for the hold, or (with start_*) an animated ProRes 4444
+    transition clip that morphs shape and radius along with the move."""
     if not FFMPEG:
         raise HTTPException(500, "ffmpeg unavailable")
     W, H = int(req.width), int(req.height)
-    bx, by = int(req.x * W), int(req.y * H)
-    bw, bh = max(4, int(req.w * W)), max(4, int(req.h * H))
+    bx, by = req.x * W, req.y * H
+    bw, bh = max(4.0, req.w * W), max(4.0, req.h * H)
     out_dir = _GRAPHICS_DIR / "out" / "headroom"
     out_dir.mkdir(parents=True, exist_ok=True)
+    import time as _tt
+    if req.start_x is not None:
+        sx, sy = float(req.start_x) * W, float(req.start_y or 0) * H
+        sw = max(4.0, float(req.start_w or 1) * W)
+        sh = max(4.0, float(req.start_h or 1) * H)
+        sr = float(req.start_radius_px or 0)
+        dur = max(0.1, float(req.duration_sec))
+        mov = out_dir / f"matte_{int(_tt.time())}.mov"
+        try:
+            _render_matte_move(mov, W, H, (sx, sy, sw, sh, sr),
+                               (bx, by, bw, bh, float(req.radius_px)),
+                               dur, max(10.0, float(req.fps)))
+        except ImportError:
+            raise HTTPException(500, "numpy unavailable for the animated matte")
+        return {"ok": True, "file": str(mov), "duration_sec": dur, "kind": "move"}
     # a PNG STILL, not video: Premiere reads straight alpha natively, stills
     # trim to any length, and the old 1fps ProRes route made Premiere throw
     # "error retrieving frame" beyond frame ~32. Unique name per render so
     # Premiere's media cache never serves a stale matte.
-    import time as _tt
     png = out_dir / f"matte_{int(_tt.time())}.png"
-    _write_rounded_matte_png(png, W, H, bx, by, bw, bh, float(req.radius_px))
-    return {"ok": True, "file": str(png), "duration_sec": max(0.5, float(req.duration_sec))}
+    _write_rounded_matte_png(png, W, H, int(bx), int(by), int(bw), int(bh), float(req.radius_px))
+    return {"ok": True, "file": str(png), "duration_sec": max(0.5, float(req.duration_sec)), "kind": "still"}
 
 
 def _resolve_node() -> Optional[str]:

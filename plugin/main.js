@@ -2660,6 +2660,16 @@ async function hrApplyInner(P) {
   const posTarget = hrMakeXY(tpl, pxv, pyv);
   const posCurrent = hrMakeXY(tpl, curXY[0], curXY[1]);
 
+  // Old crop state, read BEFORE any writes — the matte transition morphs
+  // from this rect so the shape glides instead of snapping at the landing.
+  P.v = "read start crop";
+  const startCrop = { left: 0, right: 0, top: 0, bottom: 0 };
+  if (crop) for (const k of Object.keys(startCrop)) {
+    if (!crop[k]) continue;
+    const v = await hrValueAt(crop[k], t0, "pct").catch(() => null);
+    if (v != null) startCrop[k] = v;
+  }
+
   P.v = "write Position";
   await hrDrive(project, pos, posTarget, t0, effDur, "pos", posCurrent);
   await sleep(100);
@@ -2703,7 +2713,7 @@ async function hrApplyInner(P) {
   let matteNote = "";
   if (hrBox && (hrShapeMode === "circle" || hrRadiusPx() > 0)) {
     try {
-      const m = await raceT(hrApplyMatte(seqT + effDur), 45000, "matte");
+      const m = await raceT(hrApplyMatte(seqT + effDur, { effDur, startCrop }), 120000, "matte");
       if (m) matteNote = m.popupSet
         ? (hrShapeMode === "circle" ? ` · circled (matte V${m.track + 1})` : ` · corners rounded (matte V${m.track + 1})`)
         : ` · matte on V${m.track + 1} — set Track Matte Key ▸ Matte to it (${m.info || "popup write refused"})`;
@@ -2804,6 +2814,7 @@ async function hrAddEffect(re, label) {
 // STILL of the frame under the playhead (grabbed from the source media by the
 // helper) and let the user drag boxes / click points on that.
 let hrBox = null;     // {x,y,w,h} fractions — Destination or Focus box
+let hrPrevSrcRadius = 0;   // source-space radius the last matte applied — the transition morphs from it
 let hrPoint = null;   // {x,y} fractions — Zoom point
 
 function hrMode() {
@@ -3015,7 +3026,27 @@ function hrRenderOverlays() {
 // The helper renders the overlay (dim outside + outlined focus box) through the
 // Remotion pipeline, then we import it and drop it on a new top track at the
 // playhead — the same placement path the Graphics tab uses.
-async function hrPlaceFile(path, durSec, startSec) {
+// The track that already carries a FirstPass matte, topmost first — reusing
+// it lets overwrite edits auto-trim the previous matte where the new one
+// starts, so consecutive moves never stack white blobs.
+async function hrFindMatteTrack(sequence) {
+  const CLIP = ppro.Constants?.TrackItemType?.Clip ?? 1;
+  let vCount = 0; try { vCount = await sequence.getVideoTrackCount(); } catch (_) {}
+  for (let vt = vCount - 1; vt >= 0; vt--) {
+    const trk = await sequence.getVideoTrack(vt).catch(() => null);
+    if (!trk) continue;
+    for (const it of (await trk.getTrackItems(CLIP, false) || [])) {
+      try {
+        const rc = ppro.ClipProjectItem.cast(await it.getProjectItem());
+        const mp = rc ? await rc.getMediaFilePath() : null;
+        if (mp && /[\/\\]matte_\d+\.(png|mov)$/i.test(mp)) return vt;
+      } catch (_) {}
+    }
+  }
+  return null;
+}
+
+async function hrPlaceFile(path, durSec, startSec, trackOverride) {
   const project = await ppro.Project.getActiveProject();
   const sequence = project && await project.getActiveSequence();
   if (!sequence) throw new Error("No active sequence.");
@@ -3048,11 +3079,15 @@ async function hrPlaceFile(path, durSec, startSec) {
     } catch (_) { /* stills may refuse an out-point — place at default length */ }
   }
   let trackIndex;
-  try { trackIndex = await mgResolveTrack(ppro, project, sequence, editor); }
-  catch (resolveErr) {
-    const idx = await mgPlaceOnNewTopTrack(ppro, project, sequence, editor, rawItem, mkTT(startSec));
-    if (idx < 0) throw resolveErr;
-    return idx;   // placed while creating the track — done
+  if (trackOverride != null) {
+    trackIndex = trackOverride;   // overwrite trims whatever overlaps there
+  } else {
+    try { trackIndex = await mgResolveTrack(ppro, project, sequence, editor); }
+    catch (resolveErr) {
+      const idx = await mgPlaceOnNewTopTrack(ppro, project, sequence, editor, rawItem, mkTT(startSec));
+      if (idx < 0) throw resolveErr;
+      return idx;   // placed while creating the track — done
+    }
   }
   await project.lockedAccess(() => project.executeTransaction((c) => {
     c.addAction(editor.createOverwriteItemAction(rawItem, mkTT(startSec), trackIndex, 0));
@@ -3064,11 +3099,13 @@ async function hrPlaceFile(path, durSec, startSec) {
 // UXP exposes no masks, so the pro route: the helper renders a matte matching
 // the live box, it lands on a new top track spanning the clip's remainder, and
 // a Track Matte Key on the clip keys through it (default Matte Alpha).
-async function hrApplyMatte(startSeqOpt) {
+async function hrApplyMatte(startSeqOpt, opts) {
   if (!hrBox) throw new Error("no box");
   const circle = hrShapeMode === "circle";
   const radius = circle ? 999999 : hrRadiusPx();
   if (!circle && radius <= 0) return null;
+  const effDur = (opts && opts.effDur) || 0;
+  const sCrop = (opts && opts.startCrop) || null;
   const project = await ppro.Project.getActiveProject();
   const sequence = project && await project.getActiveSequence();
   if (!sequence) throw new Error("No active sequence — open your timeline.");
@@ -3098,31 +3135,56 @@ async function hrApplyMatte(startSeqOpt) {
   const srcW = shapeW / 100, srcH = shapeH / 100;
   const srcRadius = circle ? 999999 : radius / s;
 
+  // Transition start state: the OLD crop rect (read before the move's writes)
+  // and the radius the last matte left behind — so square→circle morphs with
+  // the move instead of snapping at the landing frame.
+  const startRect = sCrop ? {
+    x: Math.max(0, sCrop.left) / 100, y: Math.max(0, sCrop.top) / 100,
+    w: Math.max(0.05, (100 - sCrop.left - sCrop.right) / 100),
+    h: Math.max(0.05, (100 - sCrop.top - sCrop.bottom) / 100),
+  } : { x: 0, y: 0, w: 1, h: 1 };
+
   overlayShow(circle ? "Cutting the circle" : "Rounding the corners");
-  overlayProgress(15, "Rendering the matte…", "");
-  let data;
-  try {
+  const W = Math.round(rect.width), H = Math.round(rect.height);
+  const rmFetch = async (body, what) => {
     const r = await fetch(`${HELPER}/render_matte`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ x: srcX, y: srcY, w: srcW, h: srcH,
-        radius_px: srcRadius, width: Math.round(rect.width), height: Math.round(rect.height),
-        duration_sec: matteDur })
+      body: JSON.stringify(body)
     });
-    if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || "Matte render failed — is the helper running?"); }
-    data = await r.json();
+    if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `${what} render failed — is the helper running?`); }
+    return r.json();
+  };
+  let moveData = null, stillData;
+  try {
+    if (effDur >= 0.1) {
+      overlayProgress(10, "Rendering the shape transition…", "");
+      moveData = await rmFetch({ x: srcX, y: srcY, w: srcW, h: srcH, radius_px: srcRadius,
+        start_x: startRect.x, start_y: startRect.y, start_w: startRect.w, start_h: startRect.h,
+        start_radius_px: hrPrevSrcRadius, width: W, height: H,
+        duration_sec: effDur, fps: 30 }, "Transition");
+    }
+    overlayProgress(35, "Rendering the matte…", "");
+    stillData = await rmFetch({ x: srcX, y: srcY, w: srcW, h: srcH,
+      radius_px: srcRadius, width: W, height: H, duration_sec: matteDur }, "Matte");
   } catch (err) { overlayHide(); throw err; }
 
   overlayProgress(55, "Placing the matte…", "");
+  // One matte track for everything: overwrites trim whatever was there, so
+  // stacked moves can't pile stale mattes on top of each other.
   let matteTrack;
-  try { matteTrack = await hrPlaceFile(data.file, data.duration_sec, t); }
-  catch (err) { overlayHide(); throw err; }
+  try {
+    matteTrack = await hrFindMatteTrack(sequence);
+    if (moveData) matteTrack = await hrPlaceFile(moveData.file, moveData.duration_sec, Math.max(st, t - effDur), matteTrack);
+    matteTrack = await hrPlaceFile(stillData.file, stillData.duration_sec, t, matteTrack);
+    hrPrevSrcRadius = Math.min(srcRadius, (Math.min(srcW * W, srcH * H)) / 2);
+  } catch (err) { overlayHide(); throw err; }
 
   overlayProgress(80, "Keying the clip…", "");
   // Every fact about the keying step lands in firstpass_debug.json via the
   // helper — the popup write has failed silently on this build before, and
   // the toast is too small to carry the whole story.
   const dbg = { step: "track-matte-key", matteTrack, components: [], params: [], attempts: [],
-    geom: { srcX, srcY, srcW, srcH, srcRadius, scalePct } };
+    geom: { srcX, srcY, srcW, srcH, srcRadius, scalePct, startRect, effDur, transition: !!moveData } };
   const shipDbg = () => fetch(`${HELPER}/debug_log`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ headroom_matte: dbg, at: new Date().toISOString() })
