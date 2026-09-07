@@ -2258,6 +2258,33 @@ async function hrCurrentValue(param) {
   return kf ? kf.value : null;
 }
 
+// Value at a specific CLIP-SOURCE time (keyframe positions live in source
+// time — see applyScaleKeyframes, which keys at srcIn+offset). Falls back to
+// the start value on builds where getValueAtTime is unhappy.
+async function hrValueAt(param, tSec) {
+  try {
+    const vo = await param.getValueAtTime(ppro.TickTime.createWithSeconds(Math.max(0, tSec)));
+    if (vo && vo.value != null) return vo.value;
+  } catch (_) {}
+  return hrCurrentValue(param);
+}
+
+// The time conversion every Headroom write needs: sequence playhead → this
+// clip's SOURCE time, with the animation window clamped inside the clip.
+async function hrClipTimes(clip, sequence, durSec) {
+  let st = 0, si = 0, du = 0;
+  try { const s = await clip.getStartTime(); st = s ? s.seconds : 0; } catch (_) {}
+  try { const p = await clip.getInPoint();   si = p ? p.seconds : 0; } catch (_) {}
+  try { const d = await clip.getDuration();  du = d ? d.seconds : 0; } catch (_) {}
+  const playhead = await sequence.getPlayerPosition().catch(() => null);
+  let tSeq = playhead ? playhead.seconds : st;
+  tSeq = Math.max(st, Math.min(tSeq, st + Math.max(0.1, du) - 0.05));
+  const t0 = si + (tSeq - st);
+  const tMax = si + Math.max(0.1, du) - 0.02;
+  const t1 = Math.min(t0 + Math.max(0, durSec), tMax);
+  return { t0, dur: Math.max(0, t1 - t0) };
+}
+
 // Building a Keyframe: Scale takes a bare number, but Position keyframes are
 // PointKeyframes whose value is a PointF CLASS INSTANCE (registry-confirmed:
 // PointF has readWrite x/y) — arrays and plain objects are rejected with
@@ -2351,7 +2378,7 @@ async function hrDrive(project, param, target, t0, dur) {
     });
     return;
   }
-  const current = await hrCurrentValue(param);
+  const current = await hrValueAt(param, t0);
   await hrSetVarying(project, param, true);
   await sleep(80);
   if (current != null) await hrAddKf(project, param, current, mkTT(t0), true);
@@ -2401,10 +2428,16 @@ async function hrApplyInner(P) {
   const wantFull = scalePct >= 100;
   const tx = wantFull ? 0.5 : fx, ty = wantFull ? 0.5 : fy;
 
+  // Keyframe positions live in CLIP SOURCE time, not sequence time (the same
+  // convention AI Motion's engine uses) — convert the playhead accordingly.
+  P.v = "map playhead to clip time";
+  const { t0, dur } = await hrClipTimes(clip, sequence, durSec);
+  const effDur = durSec > 0 ? Math.max(0.1, dur) : 0;
+
   // Discover the position space from the clip's own current value: values ≤ 2
   // mean normalized (0..1); anything bigger means sequence pixels.
   P.v = "read Position value";
-  const curPosRaw = await hrCurrentValue(pos);
+  const curPosRaw = await hrValueAt(pos, t0);
   const curXY = hrReadXY(curPosRaw);
   if (!curXY) throw new Error("Couldn't read this clip's Position value.");
   let px = tx, py = ty;
@@ -2415,19 +2448,25 @@ async function hrApplyInner(P) {
   }
   const posTarget = hrMakeXY(curPosRaw, px, py);
 
-  P.v = "read playhead";
-  const playhead = await sequence.getPlayerPosition().catch(() => null);
-  const t0 = playhead ? playhead.seconds : 0;
-
   P.v = "write Position";
-  await hrDrive(project, pos, posTarget, t0, durSec);
+  await hrDrive(project, pos, posTarget, t0, effDur);
   await sleep(100);
   P.v = "write Scale";
-  await hrDrive(project, scale, scalePct, t0, durSec);
+  await hrDrive(project, scale, scalePct, t0, effDur);
 
-  toast(durSec > 0
-    ? `Moving there over ${durSec}s from the playhead. (Cmd+Z to undo.)`
-    : `Placed. (Cmd+Z to undo.)`);
+  // Read the scale back at the landing keyframe — proof the move actually took
+  // (the same self-check AI Motion runs).
+  P.v = "verify";
+  let landed = null;
+  try {
+    const vo = await scale.getValueAtTime(ppro.TickTime.createWithSeconds(t0 + effDur));
+    if (vo && vo.value != null) landed = Math.round(+vo.value);
+  } catch (_) {}
+  const verified = landed == null ? "" :
+    (Math.abs(landed - scalePct) <= 2 ? " ✓" : ` — warning: scale reads ${landed}%`);
+  toast((effDur > 0
+    ? `Moving there over ${effDur.toFixed(1)}s from the playhead${verified}.`
+    : `Placed${verified}.`) + " (Cmd+Z to undo.)");
 }
 
 async function hrZoom(targetPct) {
@@ -2438,16 +2477,16 @@ async function hrZoom(targetPct) {
   const clip = await hrSelectedClip(sequence);
   const { pos, scale } = await hrMotionParams(clip);
   const { durSec } = hrUiChoice();
-  const playhead = await sequence.getPlayerPosition().catch(() => null);
-  const t0 = playhead ? playhead.seconds : 0;
-  const dur = Math.max(durSec, 0.3);
+  // Keyframes live in clip SOURCE time — map the playhead into the clip.
+  const { t0, dur: durClamped } = await hrClipTimes(clip, sequence, Math.max(durSec, 0.3));
+  const dur = Math.max(0.1, durClamped);
 
   // With a Zoom point set, push TOWARD it: scale to S while moving Position so
   // the clicked point lands centered — pos_end = C − (P − C)·S, same space as
   // the clip's own Position value (normalized or pixels, discovered live).
   if (hrPoint && targetPct > 100) {
     const S = targetPct / 100;
-    const curPosRaw = await hrCurrentValue(pos);
+    const curPosRaw = await hrValueAt(pos, t0);
     const curXY = hrReadXY(curPosRaw);
     if (curXY) {
       let cx = 0.5, cy = 0.5, px = hrPoint.x, py = hrPoint.y;
@@ -2461,7 +2500,7 @@ async function hrZoom(targetPct) {
     }
   } else if (targetPct <= 100) {
     // Reset also brings the frame back to center.
-    const curPosRaw = await hrCurrentValue(pos);
+    const curPosRaw = await hrValueAt(pos, t0);
     const curXY = hrReadXY(curPosRaw);
     if (curXY) {
       let cx = 0.5, cy = 0.5;
