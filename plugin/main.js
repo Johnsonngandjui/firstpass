@@ -2447,6 +2447,20 @@ async function hrDrive(project, param, target, t0, dur, kind, currentOverride) {
   if (current != null) await hrAddKf(project, param, current, mkTT(t0), true);
   await sleep(80);
   await hrAddKf(project, param, target, mkTT(t0 + dur), true);
+  // enabling the stopwatch auto-creates a keyframe of its own — sweep away
+  // everything that isn't OUR two, so the param carries exactly start + end
+  try {
+    const list = await param.getKeyframeListAsTickTimes();
+    for (const tt of (list || [])) {
+      const sec = tt && tt.seconds != null ? tt.seconds : null;
+      if (sec == null) continue;
+      if (Math.abs(sec - t0) < 0.02 || Math.abs(sec - (t0 + dur)) < 0.02) continue;
+      await project.lockedAccess(() => project.executeTransaction((c) => {
+        c.addAction(param.createRemoveKeyframeAction(tt));
+      }, "FirstPass: tidy keyframes"));
+      await sleep(40);
+    }
+  } catch (_) {}
 }
 
 function hrUiChoice() {
@@ -2510,6 +2524,19 @@ async function hrEnsureCrop(project, clip, wPct, hPct) {
   }
 }
 
+
+// True WYSIWYG: the box alone defines scale AND crop. A box at the frame's
+// aspect is uncropped; narrower crops the sides, shorter crops top/bottom.
+function hrLayoutFromBox() {
+  if (!hrBox) return null;
+  const w = Math.max(0.02, hrBox.w), h = Math.max(0.02, hrBox.h);
+  let shapeW = 100, shapeH = 100, s;
+  if (w >= h) { s = w; shapeH = Math.max(10, Math.min(100, (h / w) * 100)); }
+  else        { s = h; shapeW = Math.max(10, Math.min(100, (w / h) * 100)); }
+  return { fx: hrBox.x + w / 2, fy: hrBox.y + h / 2,
+           scalePct: Math.max(5, Math.round(s * 100)),
+           shapeW: Math.round(shapeW), shapeH: Math.round(shapeH) };
+}
 function hrShapeChoice() {
   const w = Math.max(10, Math.min(100, Number($("#hr-shape-w")?.value) || 100));
   const h = Math.max(10, Math.min(100, Number($("#hr-shape-h")?.value) || 100));
@@ -2534,14 +2561,10 @@ async function hrApplyInner(P) {
   const { pos, scale, crop } = await hrMotionParams(clip);
   let { fx, fy, scalePct, durSec } = hrUiChoice();
 
-  // The live box IS the final result: its center is the position; scale is
-  // derived so the CROPPED region fills the box exactly (box.h = s·shapeH).
-  const { w: shpW, h: shpH } = hrShapeChoice();
-  if (hrBox) {
-    fx = hrBox.x + hrBox.w / 2;
-    fy = hrBox.y + hrBox.h / 2;
-    scalePct = Math.max(5, Math.round(hrBox.h * 10000 / shpH));
-  }
+  // The live box IS the final result: position, scale AND crop all derive
+  // from it — a square box crops the sides, exactly as previewed.
+  const layout = hrLayoutFromBox();
+  if (layout) { fx = layout.fx; fy = layout.fy; scalePct = layout.scalePct; }
 
   // Full = center at 100%; otherwise the chosen cell/box at the chosen size.
   const wantFull = scalePct >= 100;
@@ -2579,7 +2602,8 @@ async function hrApplyInner(P) {
   // move (the reference morphs its mask while traveling). Falls back to the
   // standalone Crop effect only on builds whose Motion lacks crop params.
   P.v = "apply shape";
-  const { w: shapeW, h: shapeH } = hrShapeChoice();
+  const { w: shapeW, h: shapeH } = layout
+    ? { w: layout.shapeW, h: layout.shapeH } : hrShapeChoice();
   const cropL = Math.max(0, (100 - shapeW) / 2), cropT = Math.max(0, (100 - shapeH) / 2);
   const cropTargets = { left: cropL, right: cropL, top: cropT, bottom: cropT };
   const haveCrop = crop && Object.keys(crop).length >= 4;
@@ -2766,16 +2790,13 @@ async function hrRefreshFrame() {
   if (bgMeta) {
     frameImg.src = await hrGrab(bgMeta.mp, bgMeta.srcTime);
     frameImg.style.display = "block";
-    wrapEl.style.height = "";
   } else {
     // sequence floor is truly black — no canvas API in UXP, so size the wrap
     // to the sequence aspect and let its background be the black
     frameImg.style.display = "none";
     wrapEl.style.background = "#000";
-    const ar = rectAR ? rectAR.height / rectAR.width : 9 / 16;
-    wrapEl.style.display = "block";
-    wrapEl.style.height = Math.round((wrapEl.clientWidth || 300) * ar) + "px";
   }
+  if (rectAR) hrSeqAR = rectAR.height / rectAR.width;
   wrapEl.style.display = "block";
 
   const boxImg = $("#hr-box-img");
@@ -2825,9 +2846,12 @@ function hrSyncMode() {
   if (chip) chip.style.display = dest ? "block" : "none";
 }
 
+let hrSeqAR = 9 / 16;                       // sequence height/width, set on refresh
 function hrRenderOverlays() {
   const wrap = $("#hr-frame-wrap"), box = $("#hr-box"), pt = $("#hr-point");
   if (!wrap || !box || !pt) return;
+  // the preview ALWAYS holds the sequence aspect — never the image's whims
+  wrap.style.height = Math.round((wrap.clientWidth || 300) * hrSeqAR) + "px";
   const W = wrap.clientWidth, H = wrap.clientHeight;
   if (hrBox) {
     box.style.display = "block";
@@ -2835,7 +2859,11 @@ function hrRenderOverlays() {
     box.style.width = (hrBox.w * W) + "px"; box.style.height = (hrBox.h * H) + "px";
     // the box frames the CROPPED region: oversize the thumb so only the
     // central shapeW×shapeH slice shows — preview IS the final composite
-    const { w: sw, h: sh } = hrShapeChoice();
+    const lay = hrLayoutFromBox();
+    const sw = lay ? lay.shapeW : 100, sh = lay ? lay.shapeH : 100;
+    const wi = $("#hr-shape-w"), hi = $("#hr-shape-h");
+    if (wi && document.activeElement !== wi) wi.value = sw;
+    if (hi && document.activeElement !== hi) hi.value = sh;
     const img = $("#hr-box-img");
     if (img) {
       img.style.width = (10000 / sw) + "%";
