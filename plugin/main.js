@@ -2521,6 +2521,20 @@ async function hrDrive(project, param, target, t0, dur, kind, currentOverride) {
     await sleep(80);
     await hrSetVarying(project, param, true);
     await sleep(80);
+    // Enabling the stopwatch drops a keyframe AT THE PLAYHEAD whose value is
+    // whatever the engine held — on this build that's garbage (0,0)/0. It
+    // lands exactly at t0, inside the sweep's keep-tolerance, and silently
+    // shadows the start key we write next ("keyframe of 0.0 at the
+    // beginning", clip parked tiny in the corner until the move). Clear the
+    // param completely BEFORE writing the pair.
+    try {
+      for (const tt of ((await param.getKeyframeListAsTickTimes()) || [])) {
+        await project.lockedAccess(() => project.executeTransaction((c) => {
+          c.addAction(param.createRemoveKeyframeAction(tt));
+        }, "FirstPass: clear stopwatch keyframe"));
+        await sleep(40);
+      }
+    } catch (_) {}
   } else {
     // Drop the superseded future, keep every key at or before the move start.
     for (const tt of existing) {
