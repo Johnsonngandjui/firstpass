@@ -2359,11 +2359,14 @@ async function hrMakeKf(param, value) {
   }
 
   if (xy) {
-    // 1) A real PointF instance, constructed.
+    // 1) A real PointF instance — but NEVER trust the constructor args: this
+    // build accepts them and ignores them, yielding (0,0). x/y are readWrite,
+    // so assign them explicitly every time.
     if (ppro.PointF) {
-      let kf = attempt("new PointF", () => param.createKeyframe(new ppro.PointF(xy[0], xy[1])));
+      const fill = (pt) => { try { pt.x = xy[0]; pt.y = xy[1]; } catch (_) {} return pt; };
+      let kf = attempt("new PointF", () => param.createKeyframe(fill(new ppro.PointF(xy[0], xy[1]))));
       if (kf) return kf;
-      kf = attempt("PointF()", () => param.createKeyframe(ppro.PointF(xy[0], xy[1])));
+      kf = attempt("PointF()", () => param.createKeyframe(fill(ppro.PointF(xy[0], xy[1]))));
       if (kf) return kf;
     }
     // 2) Borrow a live PointF from the param's own start value and overwrite it.
