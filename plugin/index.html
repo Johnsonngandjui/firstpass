@@ -1220,7 +1220,9 @@ section[data-view="headroom"] .card { gap: 12px; }
           <div class="card-title">Frame style</div>
           <div class="action-bar" style="margin-top:10px;">
             <div class="btn secondary" id="hr-shadow" role="button" tabindex="0">Add shadow</div>
-            <div class="btn secondary" id="hr-rounded" role="button" tabindex="0">Round corners</div>
+            <input id="hr-radius" class="hr-input" type="text" value="60" style="width:52px;" aria-label="Corner radius in pixels" title="Corner radius (px)" />
+            <span class="hr-input-lbl">radius px</span>
+            <div class="btn secondary" id="hr-round" role="button" tabindex="0">Round edges</div>
             <span class="flex-spacer"></span>
           </div>
         </div>

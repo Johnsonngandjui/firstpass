@@ -83,6 +83,14 @@ class FrameGrabRequest(BaseModel):
     media_path: str           # source file of the clip under the playhead
     time_sec:   float = 0.0   # SOURCE time (clip inPoint + playhead offset)
 
+class RenderMatteRequest(BaseModel):
+    # rounded-rect matte matching the Headroom box, in frame fractions
+    x: float; y: float; w: float; h: float
+    radius_px:    float = 60.0
+    width:        int   = 3840
+    height:       int   = 2160
+    duration_sec: float = 10.0
+
 class RenderHighlightRequest(BaseModel):
     # focus box, as fractions of the frame
     x: float; y: float; w: float; h: float
@@ -228,6 +236,80 @@ def frame_grab(req: FrameGrabRequest):
         raise HTTPException(500, f"frame grab failed: {r.stderr.decode()[:200]}")
     b64 = base64.b64encode(out.read_bytes()).decode()
     return {"ok": True, "data_url": f"data:image/jpeg;base64,{b64}"}
+
+
+def _write_rounded_matte_png(path: Path, W: int, H: int,
+                             bx: int, by: int, bw: int, bh: int, r: float) -> None:
+    """Opaque-white rounded rect on transparent, hand-encoded RGBA PNG (the
+    helper venv has no PIL). Straight spans are constant rows; only the four
+    corner squares get per-pixel antialiased alpha."""
+    import zlib, struct
+    r = max(0.0, min(r, bw / 2, bh / 2))
+    ri = int(r) + 1
+
+    def corner_alpha(px: float, py: float, cx: float, cy: float) -> int:
+        d = ((px - cx) ** 2 + (py - cy) ** 2) ** 0.5
+        return max(0, min(255, int((r + 0.5 - d) * 255)))
+
+    blank = b"\x00" + b"\x00\x00\x00\x00" * W
+    white_px = b"\xff\xff\xff\xff"
+    raw = bytearray()
+    for y in range(H):
+        if y < by or y >= by + bh:
+            raw += blank; continue
+        row = bytearray(b"\x00" + b"\x00\x00\x00\x00" * W)
+        in_top = y < by + ri
+        in_bot = y >= by + bh - ri
+        x0, x1 = bx, bx + bw
+        for x in range(x0, x1):
+            a = 255
+            if in_top and x < bx + ri:      a = corner_alpha(x + .5, y + .5, bx + r, by + r)
+            elif in_top and x >= x1 - ri:   a = corner_alpha(x + .5, y + .5, x1 - r, by + r)
+            elif in_bot and x < bx + ri:    a = corner_alpha(x + .5, y + .5, bx + r, by + bh - r)
+            elif in_bot and x >= x1 - ri:   a = corner_alpha(x + .5, y + .5, x1 - r, by + bh - r)
+            if a:
+                o = 1 + x * 4
+                row[o:o + 4] = b"\xff\xff\xff" + bytes([a])
+        raw += row
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
+
+    png = (b"\x89PNG\r\n\x1a\n"
+           + chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 6, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(bytes(raw), 6))
+           + chunk(b"IEND", b""))
+    path.write_bytes(png)
+
+
+@app.post("/render_matte")
+def render_matte(req: RenderMatteRequest):
+    """Rounded-rect alpha matte for Headroom's Track Matte Key rounding —
+    a still PNG looped into ProRes 4444 for the clip's remaining duration."""
+    if not FFMPEG:
+        raise HTTPException(500, "ffmpeg unavailable")
+    W, H = int(req.width), int(req.height)
+    bx, by = int(req.x * W), int(req.y * H)
+    bw, bh = max(4, int(req.w * W)), max(4, int(req.h * H))
+    out_dir = _GRAPHICS_DIR / "out" / "headroom"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    png = out_dir / "matte.png"
+    mov = out_dir / "matte.mov"
+    import time as _t
+    _t0 = _t.time(); print(f"[matte] start {W}x{H}", flush=True)
+    _write_rounded_matte_png(png, W, H, bx, by, bw, bh, float(req.radius_px))
+    print(f"[matte] png done {_t.time()-_t0:.2f}s", flush=True)
+    dur = max(0.5, float(req.duration_sec))
+    # static content: 1 fps keeps encode time ~= seconds of duration, and
+    # Premiere renders a held frame identically to 30fps of the same pixels
+    cmd = [FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+           "-loop", "1", "-framerate", "1", "-t", f"{dur:.3f}", "-i", str(png),
+           "-c:v", "prores_ks", "-profile:v", "4444", "-pix_fmt", "yuva444p10le", str(mov)]
+    r = subprocess.run(cmd, capture_output=True, timeout=300, stdin=subprocess.DEVNULL)
+    print(f"[matte] ffmpeg done {_t.time()-_t0:.2f}s rc={r.returncode}", flush=True)
+    if r.returncode != 0 or not mov.exists():
+        raise HTTPException(500, f"matte encode failed: {r.stderr.decode()[:200]}")
+    return {"ok": True, "file": str(mov), "duration_sec": dur}
 
 
 def _resolve_node() -> Optional[str]:

@@ -2961,6 +2961,100 @@ async function hrPlaceFile(path, durSec, startSec) {
   await project.lockedAccess(() => project.executeTransaction((c) => {
     c.addAction(editor.createOverwriteItemAction(rawItem, mkTT(startSec), trackIndex, 0));
   }, "FirstPass: place highlight"));
+  return trackIndex;
+}
+
+// ── Round edges: rounded-rect alpha matte + Track Matte Key ─────────────────
+// UXP exposes no masks, so the pro route: the helper renders a matte matching
+// the live box, it lands on a new top track spanning the clip's remainder, and
+// a Track Matte Key on the clip keys through it (default Matte Alpha).
+async function hrRoundEdges() {
+  hrStatus("");
+  const layout = hrLayoutFromBox();
+  if (!hrBox || !layout) throw new Error("Refresh the frame and set the box first — the matte matches it exactly.");
+  const project = await ppro.Project.getActiveProject();
+  const sequence = project && await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence — open your timeline.");
+  const clip = await hrSelectedClip(sequence);
+  const rect = await sequence.getFrameSize().catch(() => null);
+  if (!rect) throw new Error("Couldn't read the sequence frame size.");
+
+  let st = 0, du = 0;
+  try { const v = await clip.getStartTime(); st = v ? v.seconds : 0; } catch (_) {}
+  try { const v = await clip.getDuration();  du = v ? v.seconds : 0; } catch (_) {}
+  const playhead = await sequence.getPlayerPosition().catch(() => null);
+  let t = playhead ? playhead.seconds : st;
+  t = Math.max(st, Math.min(t, st + Math.max(0.2, du) - 0.1));
+  const matteDur = Math.max(0.5, st + du - t);
+  const radius = Math.max(4, Number($("#hr-radius")?.value) || 60);
+
+  overlayShow("Rounding the corners");
+  overlayProgress(15, "Rendering the matte…", "");
+  let data;
+  try {
+    const r = await fetch(`${HELPER}/render_matte`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ x: hrBox.x, y: hrBox.y, w: hrBox.w, h: hrBox.h,
+        radius_px: radius, width: Math.round(rect.width), height: Math.round(rect.height),
+        duration_sec: matteDur })
+    });
+    if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || "Matte render failed — is the helper running?"); }
+    data = await r.json();
+  } catch (err) { overlayHide(); throw err; }
+
+  overlayProgress(55, "Placing the matte…", "");
+  let matteTrack;
+  try { matteTrack = await hrPlaceFile(data.file, data.duration_sec, t); }
+  catch (err) { overlayHide(); throw err; }
+
+  overlayProgress(80, "Keying the clip…", "");
+  try {
+    const chain = await clip.getComponentChain();
+    let comp = null;
+    const n = await chain.getComponentCount();
+    for (let i = 0; i < n; i++) {
+      const c = await chain.getComponentAtIndex(i);
+      const mn = typeof c.getMatchName === "function" ? await c.getMatchName() : "";
+      if (/track\s*matte/i.test(mn)) { comp = c; break; }
+    }
+    if (!comp) {
+      const F = ppro.VideoFilterFactory;
+      const names = (await F.getMatchNames().catch(() => null)) || [];
+      const nm = names.find((m) => /track\s*matte/i.test(m));
+      if (!nm) throw new Error("No Track Matte Key effect on this build.");
+      const fresh = await F.createComponent(nm);
+      await project.lockedAccess(() => project.executeTransaction((c) => {
+        c.addAction(chain.createAppendComponentAction(fresh));
+      }, "FirstPass: add track matte key"));
+      await sleep(150);
+      for (let i = 0; i < await chain.getComponentCount(); i++) {
+        const c = await chain.getComponentAtIndex(i);
+        const mn = typeof c.getMatchName === "function" ? await c.getMatchName() : "";
+        if (/track\s*matte/i.test(mn)) { comp = c; break; }
+      }
+    }
+    if (comp) {
+      const pc = await comp.getParamCount();
+      for (let i = 0; i < pc; i++) {
+        const p = await comp.getParam(i);
+        const dn = String(p.displayName || "").toLowerCase();
+        if (dn.includes("matte") && !dn.includes("composite") && !dn.includes("using")) {
+          const kf = await hrMakeKf(p, matteTrack + 1);   // popup: Video N
+          await project.lockedAccess(() => project.executeTransaction((c) => {
+            try { c.addAction(p.createSetValueAction(kf, true)); }
+            catch (_) { c.addAction(p.createSetValueAction(kf)); }
+          }, "FirstPass: matte track"));
+          break;
+        }
+      }
+    }
+  } catch (err) {
+    overlayHide();
+    toast(`Matte placed on V${matteTrack + 1} — set the clip's Track Matte Key "Matte" dropdown to it. (${err.message})`, true);
+    return;
+  }
+  overlayHide();
+  toast(`Corners rounded via matte on V${matteTrack + 1}. If they aren't, set the Track Matte Key "Matte" dropdown to Video ${matteTrack + 1}. (Cmd+Z ×2 undoes.)`);
 }
 
 async function hrCreateHighlight() {
@@ -3061,9 +3155,8 @@ $$(".hr-zoom").forEach((b) => b.addEventListener("click", () =>
 const hrShadowBtn = $("#hr-shadow");
 if (hrShadowBtn) hrShadowBtn.addEventListener("click", () =>
   withBusy(hrShadowBtn, "Adding…", () => hrAddEffect(/drop shadow/i, "Drop shadow")));
-const hrRoundedBtn = $("#hr-rounded");
-if (hrRoundedBtn) hrRoundedBtn.addEventListener("click", () =>
-  withBusy(hrRoundedBtn, "Adding…", () => hrAddEffect(/rounded|round.*corner/i, "Rounded corners")));
+const hrRoundBtn = $("#hr-round");
+if (hrRoundBtn) hrRoundBtn.addEventListener("click", () => withBusy(hrRoundBtn, "Rounding…", hrRoundEdges));
 const hrRefreshBtn = $("#hr-refresh");
 if (hrRefreshBtn) hrRefreshBtn.addEventListener("click", () => withBusy(hrRefreshBtn, "Grabbing…", hrRefreshFrame));
 $$('.segmented[data-group="hr-mode"] .seg').forEach((s) =>
