@@ -2222,13 +2222,32 @@ async function hrSelectedClip(sequence) {
 }
 
 // Motion params: Position = index 0, Scale = index 1 (same probe as AI Motion).
+// Motion params by DISPLAY NAME. Premiere 2026's Motion component carries
+// Crop Left/Top/Right/Bottom natively (confirmed in the reference's own
+// Effect Controls) — so reshape keyframes those alongside Position/Scale,
+// morphing with the move exactly like the reference. Index fallback 0/1
+// covers builds whose names differ.
 async function hrMotionParams(clip) {
   const chain = await clip.getComponentChain();
   const n = await chain.getComponentCount();
   for (let i = 0; i < n; i++) {
     const c = await chain.getComponentAtIndex(i);
     const mn = typeof c.getMatchName === "function" ? await c.getMatchName() : "";
-    if (/ADBE Motion/i.test(mn)) return { pos: await c.getParam(0), scale: await c.getParam(1), chain };
+    if (!/ADBE Motion/i.test(mn)) continue;
+    const out = { pos: null, scale: null, crop: {}, chain };
+    let pc = 0; try { pc = await c.getParamCount(); } catch (_) {}
+    for (let j = 0; j < pc; j++) {
+      try {
+        const p = await c.getParam(j);
+        const dn = String(p.displayName || "").trim().toLowerCase();
+        if (dn === "position") out.pos = p;
+        else if (dn === "scale") out.scale = p;
+        else if (dn.startsWith("crop ")) out.crop[dn.slice(5)] = p;   // left/top/right/bottom
+      } catch (_) {}
+    }
+    if (!out.pos)   out.pos   = await c.getParam(0);
+    if (!out.scale) out.scale = await c.getParam(1);
+    return out;
   }
   throw new Error("This clip has no Motion properties to animate.");
 }
@@ -2269,6 +2288,10 @@ function hrSane(v, kind) {
     const n = Number(v);
     return (isFinite(n) && n >= 1 && n <= 10000) ? n : null;
   }
+  if (kind === "pct") {                      // crop percentages: 0..100 is real
+    const n = Number(v);
+    return (isFinite(n) && n >= 0 && n <= 100) ? n : null;
+  }
   const xy = hrReadXY(v);
   if (!xy || !isFinite(xy[0]) || !isFinite(xy[1])) return null;
   // Zero-zero IS this build's garbage tell for an unkeyed Position (a real
@@ -2287,6 +2310,7 @@ async function hrValueAt(param, tSec, kind) {
     try { const kf = await param.getStartValue(); if (kf && kf.value != null) v = hrSane(kf.value, kind); } catch (_) {}
   }
   if (v == null && kind === "scale") v = 100;
+  if (v == null && kind === "pct") v = 0;    // untouched crop is zero
   // An untouched clip sits centered; normalized is this build's proven space.
   if (v == null && kind === "pos") v = [0.5, 0.5];
   return v;
@@ -2424,7 +2448,9 @@ function hrUiChoice() {
     fx: posBtn ? Number(posBtn.dataset.x) : 0.5,
     fy: posBtn ? Number(posBtn.dataset.y) : 0.5,
     scalePct: size ? Number(size.dataset.val) : 33,
-    durSec: dur ? Number(dur.dataset.val) : 0.5,
+    // Move speeds are FRAME counts (Quick 12f / Smooth 24f / Long 50f, like
+    // the reference); ~30fps timebase turns them into seconds.
+    durSec: dur ? Number(dur.dataset.val) / 30 : 0.8,
   };
 }
 
@@ -2496,7 +2522,7 @@ async function hrApplyInner(P) {
   P.v = "find selected clip";
   const clip = await hrSelectedClip(sequence);
   P.v = "read Motion params";
-  const { pos, scale } = await hrMotionParams(clip);
+  const { pos, scale, crop } = await hrMotionParams(clip);
   let { fx, fy, scalePct, durSec } = hrUiChoice();
 
   // A dragged Destination box beats the grid: its center is the position, its
@@ -2537,10 +2563,23 @@ async function hrApplyInner(P) {
   P.v = "write Scale";
   await hrDrive(project, scale, scalePct, t0, effDur, "scale");
 
-  // Reshape (Portrait/Wide or custom width/height) via the Crop effect.
+  // Reshape: Motion's native Crop Left/Top/Right/Bottom, ANIMATED with the
+  // move (the reference morphs its mask while traveling). Falls back to the
+  // standalone Crop effect only on builds whose Motion lacks crop params.
   P.v = "apply shape";
   const { w: shapeW, h: shapeH } = hrShapeChoice();
-  if (shapeW < 100 || shapeH < 100) await hrEnsureCrop(project, clip, shapeW, shapeH);
+  const cropL = Math.max(0, (100 - shapeW) / 2), cropT = Math.max(0, (100 - shapeH) / 2);
+  const cropTargets = { left: cropL, right: cropL, top: cropT, bottom: cropT };
+  const haveCrop = crop && Object.keys(crop).length >= 4;
+  if (haveCrop) {
+    for (const k of ["left", "right", "top", "bottom"]) {
+      if (!crop[k]) continue;
+      await hrDrive(project, crop[k], cropTargets[k], t0, effDur, "pct");
+      await sleep(60);
+    }
+  } else if (shapeW < 100 || shapeH < 100) {
+    await hrEnsureCrop(project, clip, shapeW, shapeH);
+  }
 
   // Read the scale back at the landing keyframe — proof the move actually took
   // (the same self-check AI Motion runs).

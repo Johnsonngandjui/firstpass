@@ -199,7 +199,8 @@ body {
 section[data-view="headroom"] .card { margin-bottom: 14px; }
 section[data-view="headroom"] .card-title { margin-bottom: 2px; }
 #hr-grid { display: grid; grid-template-columns: repeat(3, 48px); gap: 8px; margin: 8px 0 4px; }
-#hr-grid .hr-pos { height: 38px; padding: 0; font-size: 15px; }
+#hr-grid .hr-pos { height: 38px; padding: 0; font-size: 15px; border-radius: 50%; }
+.hr-shape { min-height: 54px; }
 #hr-grid .hr-pos.active { border-color: var(--accent, #7c8cff); color: var(--text); }
 .hr-input {
   background: var(--bg);
@@ -1151,9 +1152,9 @@ section[data-view="headroom"] .card-title { margin-bottom: 2px; }
           <div class="card-title" style="margin-top:12px;">Move</div>
           <div class="segmented compact" data-group="hr-dur">
             <div class="seg" data-val="0" role="button" tabindex="0">Instant</div>
-            <div class="seg" data-val="0.3" role="button" tabindex="0">Quick</div>
-            <div class="seg active" data-val="0.5" role="button" tabindex="0">Smooth</div>
-            <div class="seg" data-val="0.8" role="button" tabindex="0">Slow</div>
+            <div class="seg" data-val="12" role="button" tabindex="0">Quick · 12f</div>
+            <div class="seg active" data-val="24" role="button" tabindex="0">Smooth · 24f</div>
+            <div class="seg" data-val="50" role="button" tabindex="0">Long · 50f</div>
           </div>
 
           <div class="action-bar" style="margin-top:14px;">
