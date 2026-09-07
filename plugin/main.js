@@ -2271,9 +2271,10 @@ function hrSane(v, kind) {
   }
   const xy = hrReadXY(v);
   if (!xy || !isFinite(xy[0]) || !isFinite(xy[1])) return null;
-  // Position must be plausibly on/near the canvas in either space: normalized
-  // values live in roughly -1..2; pixel values are > 2. Zero-zero with no
-  // keyframes set is this build's "garbage" tell for a centered clip.
+  // Zero-zero IS this build's garbage tell for an unkeyed Position (a real
+  // untouched clip sits at center, never the corner) — treat it as unreadable
+  // so the fallback chain runs instead of animating in from the left edge.
+  if (Math.abs(xy[0]) < 1e-6 && Math.abs(xy[1]) < 1e-6) return null;
   return v;
 }
 async function hrValueAt(param, tSec, kind) {
@@ -2286,6 +2287,8 @@ async function hrValueAt(param, tSec, kind) {
     try { const kf = await param.getStartValue(); if (kf && kf.value != null) v = hrSane(kf.value, kind); } catch (_) {}
   }
   if (v == null && kind === "scale") v = 100;
+  // An untouched clip sits centered; normalized is this build's proven space.
+  if (v == null && kind === "pos") v = [0.5, 0.5];
   return v;
 }
 
@@ -2651,25 +2654,27 @@ function hrMode() {
   return a ? a.dataset.val : "dest";
 }
 
-// Clip to photograph: the selection if any, else the TOPMOST clip under the
-// playhead (what the viewer actually sees).
-async function hrFrameClip(sequence, t) {
-  try { return await hrSelectedClip(sequence); } catch (_) {}
-  const CLIP = ppro.Constants?.TrackItemType?.Clip ?? 1;
-  let vCount = 1; try { vCount = await sequence.getVideoTrackCount(); } catch (_) {}
-  for (let vt = vCount - 1; vt >= 0; vt--) {
-    const trk = await sequence.getVideoTrack(vt).catch(() => null);
-    if (!trk) continue;
-    for (const it of (await trk.getTrackItems(CLIP, false) || [])) {
-      let st = 0, du = 0;
-      try { const s = await it.getStartTime(); st = s ? s.seconds : 0; } catch (_) {}
-      try { const d = await it.getDuration();  du = d ? d.seconds : 0; } catch (_) {}
-      if (t >= st && t < st + du) return it;
-    }
-  }
-  throw new Error("No clip under the playhead.");
+async function hrClipMeta(clip, t) {
+  let mp = null, inS = 0, st = 0;
+  try { const rc = ppro.ClipProjectItem.cast(await clip.getProjectItem()); mp = rc ? await rc.getMediaFilePath() : null; } catch (_) {}
+  try { const p = await clip.getInPoint();   inS = p ? p.seconds : 0; } catch (_) {}
+  try { const s = await clip.getStartTime(); st = s ? s.seconds : 0; } catch (_) {}
+  return { mp, srcTime: Math.max(0, inS + (t - st)), st };
 }
 
+async function hrGrab(mp, srcTime) {
+  const r = await fetch(`${HELPER}/frame_grab`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ media_path: mp, time_sec: srcTime })
+  });
+  if (!r.ok) throw new Error("Frame grab failed — is the helper running?");
+  return (await r.json()).data_url;
+}
+
+// The reference behavior: the preview shows the SCENE (what's behind), and the
+// Destination box carries the selected clip's own image — you drag the whole
+// video around as a picture-in-picture. Background = the lowest clip under the
+// playhead that isn't the selection; the box starts where the clip is NOW.
 async function hrRefreshFrame() {
   hrStatus("");
   const project = await ppro.Project.getActiveProject();
@@ -2677,25 +2682,82 @@ async function hrRefreshFrame() {
   if (!sequence) throw new Error("No active sequence — open your timeline.");
   const playhead = await sequence.getPlayerPosition().catch(() => null);
   const t = playhead ? playhead.seconds : 0;
-  const clip = await hrFrameClip(sequence, t);
 
-  let mp = null, inS = 0, st = 0;
-  try { const rc = ppro.ClipProjectItem.cast(await clip.getProjectItem()); mp = rc ? await rc.getMediaFilePath() : null; } catch (_) {}
-  if (!mp) throw new Error("Couldn't resolve the clip's source file.");
-  try { const p = await clip.getInPoint();   inS = p ? p.seconds : 0; } catch (_) {}
-  try { const s = await clip.getStartTime(); st = s ? s.seconds : 0; } catch (_) {}
-  const srcTime = Math.max(0, inS + (t - st));
+  let sel = null;
+  try { sel = await hrSelectedClip(sequence); } catch (_) {}
+  const selMeta = sel ? await hrClipMeta(sel, t) : null;
 
-  const r = await fetch(`${HELPER}/frame_grab`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ media_path: mp, time_sec: srcTime })
-  });
-  if (!r.ok) throw new Error("Frame grab failed — is the helper running?");
-  const data = await r.json();
-  $("#hr-frame").src = data.data_url;
+  // scene = lowest-track clip at the playhead that isn't the selection
+  const CLIP = ppro.Constants?.TrackItemType?.Clip ?? 1;
+  let bgMeta = null;
+  let vCount = 1; try { vCount = await sequence.getVideoTrackCount(); } catch (_) {}
+  outer:
+  for (let vt = 0; vt < vCount; vt++) {
+    const trk = await sequence.getVideoTrack(vt).catch(() => null);
+    if (!trk) continue;
+    for (const it of (await trk.getTrackItems(CLIP, false) || [])) {
+      let st = 0, du = 0;
+      try { const s = await it.getStartTime(); st = s ? s.seconds : 0; } catch (_) {}
+      try { const d = await it.getDuration();  du = d ? d.seconds : 0; } catch (_) {}
+      if (t < st || t >= st + du) continue;
+      const m = await hrClipMeta(it, t);
+      if (!m.mp) continue;
+      if (selMeta && m.mp === selMeta.mp && Math.abs(m.st - selMeta.st) < 0.01) continue;
+      bgMeta = m; break outer;
+    }
+  }
+
+  if (!bgMeta && !selMeta) throw new Error("No clips under the playhead.");
+  const bg = bgMeta || selMeta;                       // single-clip timeline: it IS the scene
+  $("#hr-frame").src = await hrGrab(bg.mp, bg.srcTime);
   $("#hr-frame-wrap").style.display = "block";
+
+  const boxImg = $("#hr-box-img");
+  if (selMeta && boxImg) {
+    try { boxImg.src = await hrGrab(selMeta.mp, selMeta.srcTime); } catch (_) {}
+  }
+
+  // header: clip name · sequence · frame size (their layout-state strip)
+  try {
+    const rect = await sequence.getFrameSize().catch(() => null);
+    const info = $("#hr-clipinfo");
+    if (info) {
+      const name = selMeta ? String(selMeta.mp).split("/").pop() : "no clip selected";
+      info.textContent = `${name} · ${sequence.name}${rect ? ` · ${Math.round(rect.width)}×${Math.round(rect.height)}` : ""}`;
+      info.style.display = "block";
+    }
+  } catch (_) {}
+
+  // start the Destination box where the clip currently sits
+  if (sel) {
+    try {
+      const { pos, scale } = await hrMotionParams(sel);
+      const { t0 } = await hrClipTimes(sel, sequence, 0);
+      const xy = hrReadXY(await hrValueAt(pos, t0, "pos")) || [0.5, 0.5];
+      let cx = xy[0], cy = xy[1];
+      if (Math.abs(cx) > 2 || Math.abs(cy) > 2) {
+        const rect = await sequence.getFrameSize().catch(() => null);
+        if (rect) { cx = cx / rect.width; cy = cy / rect.height; }
+      }
+      const s = Math.max(0.05, Math.min(1.5, (await hrValueAt(scale, t0, "scale")) / 100));
+      hrBox = { x: Math.max(0, cx - s / 2), y: Math.max(0, cy - s / 2),
+                w: Math.min(1, s), h: Math.min(1, s) };
+    } catch (_) {}
+  }
+  hrSyncMode();
+  hrRenderOverlays();
   const hint = $("#hr-frame-hint");
-  if (hint) hint.textContent = "Frame loaded — drag a box (Destination/Focus) or click a point (Zoom).";
+  if (hint) hint.textContent = sel
+    ? "Destination loaded — drag the clip where it should go, or drag the handle to resize."
+    : "Scene loaded — select a clip for a Destination preview, or draw a Focus box / click a Zoom point.";
+}
+
+// Destination mode shows the clip's image in the box; Zoom/Focus keep it clean.
+function hrSyncMode() {
+  const dest = hrMode() === "dest";
+  const img = $("#hr-box-img"), chip = $("#hr-box-chip");
+  if (img)  img.style.display  = dest && img.src ? "block" : "none";
+  if (chip) chip.style.display = dest ? "block" : "none";
 }
 
 function hrRenderOverlays() {
@@ -2864,6 +2926,8 @@ if (hrRoundedBtn) hrRoundedBtn.addEventListener("click", () =>
   withBusy(hrRoundedBtn, "Adding…", () => hrAddEffect(/rounded|round.*corner/i, "Rounded corners")));
 const hrRefreshBtn = $("#hr-refresh");
 if (hrRefreshBtn) hrRefreshBtn.addEventListener("click", () => withBusy(hrRefreshBtn, "Grabbing…", hrRefreshFrame));
+$$('.segmented[data-group="hr-mode"] .seg').forEach((s) =>
+  s.addEventListener("click", () => setTimeout(hrSyncMode, 0)));
 const hrHlBtn = $("#hr-hlcreate");
 if (hrHlBtn) hrHlBtn.addEventListener("click", () => withBusy(hrHlBtn, "Creating…", hrCreateHighlight));
 

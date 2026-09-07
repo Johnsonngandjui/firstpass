@@ -1088,7 +1088,8 @@ section[data-view="headroom"] .card-title { margin-bottom: 2px; }
         <p class="hint-note">Select the clip on the timeline first. Everything is undoable. <span style="opacity:.7;">(Cmd+Z.)</span></p>
 
         <div class="card">
-          <div class="card-title">Frame picker <span style="opacity:.6;font-weight:400;">— grabs the frame under the playhead</span></div>
+          <div id="hr-clipinfo" class="hint-note" style="display:none;margin:0 0 8px;"></div>
+          <div class="card-title">Frame picker <span style="opacity:.6;font-weight:400;">— preview destination · drag inside to move · drag a handle to resize</span></div>
           <div class="action-bar" style="margin-top:8px;">
             <div class="segmented compact" data-group="hr-mode">
               <div class="seg active" data-val="dest" role="button" tabindex="0">Destination</div>
@@ -1100,8 +1101,10 @@ section[data-view="headroom"] .card-title { margin-bottom: 2px; }
           </div>
           <div id="hr-frame-wrap" style="position:relative;margin-top:10px;background:#111;border-radius:8px;overflow:hidden;display:none;touch-action:none;">
             <img id="hr-frame" style="display:block;width:100%;user-select:none;-webkit-user-drag:none;" />
-            <div id="hr-box" style="position:absolute;border:2px solid #74c8ff;background:rgba(116,200,255,.12);display:none;cursor:move;">
-              <div id="hr-box-handle" style="position:absolute;right:-7px;bottom:-7px;width:14px;height:14px;background:#74c8ff;border-radius:3px;cursor:nwse-resize;"></div>
+            <div id="hr-box" style="position:absolute;border:2px solid #e8e8e8;background:rgba(0,0,0,.15);display:none;cursor:move;box-shadow:0 6px 24px rgba(0,0,0,.45);overflow:visible;">
+              <img id="hr-box-img" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:none;pointer-events:none;" />
+              <div id="hr-box-chip" style="position:absolute;left:6px;top:6px;background:rgba(0,0,0,.75);color:#eee;font-size:10px;font-weight:600;padding:2px 7px;border-radius:4px;pointer-events:none;">Destination</div>
+              <div id="hr-box-handle" style="position:absolute;right:-7px;bottom:-7px;width:14px;height:14px;background:#e8e8e8;border:1px solid #333;border-radius:50%;cursor:nwse-resize;"></div>
             </div>
             <div id="hr-point" style="position:absolute;width:14px;height:14px;margin:-7px 0 0 -7px;border:2px solid #74c8ff;border-radius:50%;background:rgba(116,200,255,.35);display:none;pointer-events:none;"></div>
           </div>
