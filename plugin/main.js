@@ -3084,14 +3084,28 @@ async function hrApplyMatte(startSeqOpt) {
   t = Math.max(st, Math.min(t, st + Math.max(0.2, du) - 0.1));
   const matteDur = Math.max(0.5, st + du - t);
 
+  // TMK composites in the clip's PRE-Motion space (proved on-screen: the
+  // circle arrived shrunken by the clip's scale and cut at the crop edge).
+  // So the matte is drawn in SOURCE coordinates — centered on the crop rect,
+  // radius divided by the landing scale — and the clip's own Motion keyframes
+  // carry it into exactly the box the user drew. The matte itself never moves.
+  const layout = hrLayoutFromBox();
+  const scalePct = layout ? layout.scalePct : (hrUiChoice().scalePct || 100);
+  const { w: shapeW, h: shapeH } = layout
+    ? { w: layout.shapeW, h: layout.shapeH } : hrShapeChoice();
+  const s = Math.max(0.05, scalePct / 100);
+  const srcX = (100 - shapeW) / 200, srcY = (100 - shapeH) / 200;   // crop rect, normalized
+  const srcW = shapeW / 100, srcH = shapeH / 100;
+  const srcRadius = circle ? 999999 : radius / s;
+
   overlayShow(circle ? "Cutting the circle" : "Rounding the corners");
   overlayProgress(15, "Rendering the matte…", "");
   let data;
   try {
     const r = await fetch(`${HELPER}/render_matte`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ x: hrBox.x, y: hrBox.y, w: hrBox.w, h: hrBox.h,
-        radius_px: radius, width: Math.round(rect.width), height: Math.round(rect.height),
+      body: JSON.stringify({ x: srcX, y: srcY, w: srcW, h: srcH,
+        radius_px: srcRadius, width: Math.round(rect.width), height: Math.round(rect.height),
         duration_sec: matteDur })
     });
     if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || "Matte render failed — is the helper running?"); }
@@ -3107,7 +3121,8 @@ async function hrApplyMatte(startSeqOpt) {
   // Every fact about the keying step lands in firstpass_debug.json via the
   // helper — the popup write has failed silently on this build before, and
   // the toast is too small to carry the whole story.
-  const dbg = { step: "track-matte-key", matteTrack, components: [], params: [], attempts: [] };
+  const dbg = { step: "track-matte-key", matteTrack, components: [], params: [], attempts: [],
+    geom: { srcX, srcY, srcW, srcH, srcRadius, scalePct } };
   const shipDbg = () => fetch(`${HELPER}/debug_log`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ headroom_matte: dbg, at: new Date().toISOString() })
