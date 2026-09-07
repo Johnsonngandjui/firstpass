@@ -2512,58 +2512,65 @@ async function hrDrive(project, param, target, t0, dur, kind, currentOverride) {
   // Instant on an animated param = a one-frame cut that keeps history.
   const effDur = dur <= 0 ? 1 / 30 : dur;
 
-  // Read what's on screen BEFORE touching keys — the hold value up to t0.
-  const current = currentOverride !== undefined ? currentOverride
-                : await hrValueAt(param, t0, kind);
+  const removeKey = async (tt) => {
+    try {
+      await project.lockedAccess(() => project.executeTransaction((c) => {
+        c.addAction(param.createRemoveKeyframeAction(tt));
+      }, "FirstPass: tidy keyframes"));
+      await sleep(40);
+    } catch (_) {}
+  };
+  // The value stored AT a keyframe, sanity-gated. null = garbage — a (0,0)
+  // position or zero scale can only come from the stopwatch bug, never from
+  // a Move it write.
+  const keyValue = async (tt) => {
+    try {
+      const vo = await param.getValueAtTime(tt);
+      return vo && vo.value != null ? hrSane(vo.value, kind) : null;
+    } catch (_) { return null; }
+  };
+
   if (!hadKeys) {
     // Fresh param: the false→true stopwatch reset AI Motion uses.
     await hrSetVarying(project, param, false);
     await sleep(80);
     await hrSetVarying(project, param, true);
     await sleep(80);
-    // Enabling the stopwatch drops a keyframe AT THE PLAYHEAD whose value is
-    // whatever the engine held — on this build that's garbage (0,0)/0. It
-    // lands exactly at t0, inside the sweep's keep-tolerance, and silently
-    // shadows the start key we write next ("keyframe of 0.0 at the
-    // beginning", clip parked tiny in the corner until the move). Clear the
-    // param completely BEFORE writing the pair.
-    try {
-      for (const tt of ((await param.getKeyframeListAsTickTimes()) || [])) {
-        await project.lockedAccess(() => project.executeTransaction((c) => {
-          c.addAction(param.createRemoveKeyframeAction(tt));
-        }, "FirstPass: clear stopwatch keyframe"));
-        await sleep(40);
-      }
-    } catch (_) {}
-  } else {
-    // Drop the superseded future, keep every key at or before the move start.
-    for (const tt of existing) {
-      const sec = tt && tt.seconds != null ? tt.seconds : null;
-      if (sec == null || sec <= t0 - 0.02) continue;
-      try {
-        await project.lockedAccess(() => project.executeTransaction((c) => {
-          c.addAction(param.createRemoveKeyframeAction(tt));
-        }, "FirstPass: clear superseded keyframes"));
-        await sleep(40);
-      } catch (_) {}
-    }
   }
+  // ONE cleanup rule, applied BEFORE the current-state read so poisoned
+  // history can't leak into the new start key:
+  //  · fresh param — owns nothing: drop every key, including the garbage
+  //    auto-key the stopwatch just planted at the playhead
+  //  · keys after the move start — a superseded plan: drop
+  //  · past keys holding garbage values — leftovers of the old stopwatch
+  //    bug ("keyframe of 0.0 at the beginning"): drop, so re-running a move
+  //    on a damaged clip actually repairs it
+  try {
+    for (const tt of ((await param.getKeyframeListAsTickTimes()) || [])) {
+      const sec = tt && tt.seconds != null ? tt.seconds : null;
+      if (sec == null) continue;
+      let kill = !hadKeys || sec > t0 - 0.02;
+      if (!kill && (await keyValue(tt)) == null) kill = true;
+      if (kill) await removeKey(tt);
+    }
+  } catch (_) {}
+
+  // Read what's on screen AFTER the cleanup — with poison gone, an unreadable
+  // state falls through the sanity gates to center/100/0 defaults.
+  const current = currentOverride !== undefined ? currentOverride
+                : await hrValueAt(param, t0, kind);
   if (current != null) await hrAddKf(project, param, current, mkTT(t0), true);
   await sleep(80);
   await hrAddKf(project, param, target, mkTT(t0 + effDur), true);
-  // enabling the stopwatch auto-creates a keyframe of its own — on a fresh
-  // param sweep everything that isn't OUR pair. A param with history keeps
-  // its past untouched.
-  if (!hadKeys) try {
-    const list = await param.getKeyframeListAsTickTimes();
-    for (const tt of (list || [])) {
+  // Belt and braces: a stopwatch key can materialize LATE, after the clear
+  // above. Keep OUR pair and sane history strictly before t0; drop the rest.
+  try {
+    for (const tt of ((await param.getKeyframeListAsTickTimes()) || [])) {
       const sec = tt && tt.seconds != null ? tt.seconds : null;
       if (sec == null) continue;
       if (Math.abs(sec - t0) < 0.02 || Math.abs(sec - (t0 + effDur)) < 0.02) continue;
-      await project.lockedAccess(() => project.executeTransaction((c) => {
-        c.addAction(param.createRemoveKeyframeAction(tt));
-      }, "FirstPass: tidy keyframes"));
-      await sleep(40);
+      if (hadKeys && sec < t0 - 0.02 && (await keyValue(tt)) != null) continue;
+      await removeKey(tt);
     }
   } catch (_) {}
 }

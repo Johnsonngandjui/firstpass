@@ -304,10 +304,14 @@ def _matte_alpha_np(W: int, H: int, bx: float, by: float, bw: float, bh: float, 
     return np.clip((r + 0.5 - d) * 255.0, 0.0, 255.0).astype(np.uint8)
 
 
-def _render_matte_move(path: Path, W: int, H: int, start, end, dur: float, fps: float) -> None:
+def _render_matte_move(path: Path, W: int, H: int, start, end, dur: float, fps: float,
+                       hold_frames: int = 8) -> None:
     """Animated matte: white rounded rect morphing start→end, straight-alpha
     ProRes 4444 (yuva444p10le — the load-bearing flag), rawvideo piped in so
-    no intermediate frames touch disk. start/end = (bx, by, bw, bh, r) px."""
+    no intermediate frames touch disk. start/end = (bx, by, bw, bh, r) px.
+    hold_frames of the END state pad the tail: the placed clip never reaches
+    its media end (last ProRes samples can refuse to decode → 1-frame black
+    with Track Matte Key), and the hold still overwrites the pad anyway."""
     import numpy as np
     n = max(2, int(round(dur * fps)))
     cmd = [FFMPEG, "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{W}x{H}",
@@ -319,8 +323,8 @@ def _render_matte_move(path: Path, W: int, H: int, start, end, dur: float, fps: 
     frame = np.empty((H, W, 4), dtype=np.uint8)
     frame[..., 0:3] = 255                      # straight alpha: RGB stays white
     try:
-        for i in range(n):
-            t = i / (n - 1)
+        for i in range(n + hold_frames):
+            t = min(1.0, i / (n - 1))
             t = t * t * (3 - 2 * t)            # smoothstep ≈ the move's bezier ease
             g = [a + (b - a) * t for a, b in zip(start, end)]
             frame[..., 3] = _matte_alpha_np(W, H, *g)
@@ -350,14 +354,18 @@ def render_matte(req: RenderMatteRequest):
         sh = max(4.0, float(req.start_h or 1) * H)
         sr = float(req.start_radius_px or 0)
         dur = max(0.1, float(req.duration_sec))
+        fps = max(10.0, float(req.fps))
         mov = out_dir / f"matte_{int(_tt.time())}.mov"
         try:
             _render_matte_move(mov, W, H, (sx, sy, sw, sh, sr),
                                (bx, by, bw, bh, float(req.radius_px)),
-                               dur, max(10.0, float(req.fps)))
+                               dur, fps, hold_frames=8)
         except ImportError:
             raise HTTPException(500, "numpy unavailable for the animated matte")
-        return {"ok": True, "file": str(mov), "duration_sec": dur, "kind": "move"}
+        # Report 6 of the 8 hold frames: the timeline clip overlaps the hold
+        # still (which trims it back to the landing), while the last 2 frames
+        # of media never render — the decode-unsafe tail stays untouched.
+        return {"ok": True, "file": str(mov), "duration_sec": dur + 6.0 / fps, "kind": "move"}
     # a PNG STILL, not video: Premiere reads straight alpha natively, stills
     # trim to any length, and the old 1fps ProRes route made Premiere throw
     # "error retrieving frame" beyond frame ~32. Unique name per render so
