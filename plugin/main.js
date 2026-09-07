@@ -2488,7 +2488,17 @@ async function hrDrive(project, param, target, t0, dur, kind, currentOverride) {
     if (!isFinite(v) || v < 0) throw new Error(`invalid time ${s}`);
     return ppro.TickTime.createWithSeconds(Math.round(v * 1000) / 1000);
   };
-  if (dur <= 0) {
+  // What's already keyed decides the strategy: a param with history must KEEP
+  // it — wiping the stopwatch here is what made earlier moves vanish when a
+  // second one was applied ("animations don't hold"). Each move now clears
+  // only its own FUTURE (keys after the move start are a superseded plan) and
+  // appends its pair, so moves accumulate along the clip like manual editing.
+  let existing = [];
+  try { existing = (await param.getKeyframeListAsTickTimes()) || []; } catch (_) {}
+  const hadKeys = existing.length > 0;
+
+  // Instant placement on a still-static param stays a plain value write.
+  if (dur <= 0 && !hadKeys) {
     const kf = await hrMakeKf(param, target);
     await project.lockedAccess(() => {
       project.executeTransaction((c) => {
@@ -2499,28 +2509,43 @@ async function hrDrive(project, param, target, t0, dur, kind, currentOverride) {
     });
     return;
   }
-  // Read what's on screen FIRST, then wipe the param clean (false→true is the
-  // same reset AI Motion uses). Every earlier attempt's keyframes — including
-  // broken ones — die here, so each move is exactly two keyframes: current at
-  // the playhead, target after it. Without this, stale keyframes from previous
-  // runs kept playing underneath each new move.
+  // Instant on an animated param = a one-frame cut that keeps history.
+  const effDur = dur <= 0 ? 1 / 30 : dur;
+
+  // Read what's on screen BEFORE touching keys — the hold value up to t0.
   const current = currentOverride !== undefined ? currentOverride
                 : await hrValueAt(param, t0, kind);
-  await hrSetVarying(project, param, false);
-  await sleep(80);
-  await hrSetVarying(project, param, true);
-  await sleep(80);
+  if (!hadKeys) {
+    // Fresh param: the false→true stopwatch reset AI Motion uses.
+    await hrSetVarying(project, param, false);
+    await sleep(80);
+    await hrSetVarying(project, param, true);
+    await sleep(80);
+  } else {
+    // Drop the superseded future, keep every key at or before the move start.
+    for (const tt of existing) {
+      const sec = tt && tt.seconds != null ? tt.seconds : null;
+      if (sec == null || sec <= t0 - 0.02) continue;
+      try {
+        await project.lockedAccess(() => project.executeTransaction((c) => {
+          c.addAction(param.createRemoveKeyframeAction(tt));
+        }, "FirstPass: clear superseded keyframes"));
+        await sleep(40);
+      } catch (_) {}
+    }
+  }
   if (current != null) await hrAddKf(project, param, current, mkTT(t0), true);
   await sleep(80);
-  await hrAddKf(project, param, target, mkTT(t0 + dur), true);
-  // enabling the stopwatch auto-creates a keyframe of its own — sweep away
-  // everything that isn't OUR two, so the param carries exactly start + end
-  try {
+  await hrAddKf(project, param, target, mkTT(t0 + effDur), true);
+  // enabling the stopwatch auto-creates a keyframe of its own — on a fresh
+  // param sweep everything that isn't OUR pair. A param with history keeps
+  // its past untouched.
+  if (!hadKeys) try {
     const list = await param.getKeyframeListAsTickTimes();
     for (const tt of (list || [])) {
       const sec = tt && tt.seconds != null ? tt.seconds : null;
       if (sec == null) continue;
-      if (Math.abs(sec - t0) < 0.02 || Math.abs(sec - (t0 + dur)) < 0.02) continue;
+      if (Math.abs(sec - t0) < 0.02 || Math.abs(sec - (t0 + effDur)) < 0.02) continue;
       await project.lockedAccess(() => project.executeTransaction((c) => {
         c.addAction(param.createRemoveKeyframeAction(tt));
       }, "FirstPass: tidy keyframes"));
@@ -3361,6 +3386,9 @@ $$(".hr-shape").forEach((b) => b.addEventListener("click", () => {
   if (b.dataset.h && h) h.value = b.dataset.h;
   if (!hrBox) hrBox = { x: 0.35, y: 0.3, w: 0.3, h: 0.3 };
   if (hrShapeMode === "full") hrBox = { x: 0, y: 0, w: 1, h: 1 };
+  // Circle implies its own rounding — the radius field goes quiet.
+  const rf = $("#hr-radius-field");
+  if (rf) rf.classList.toggle("dimmed", hrShapeMode === "circle");
   hrSetBoxAspect(); hrRenderOverlays();
 }));
 ["hr-shape-w", "hr-shape-h"].forEach((id) => {
