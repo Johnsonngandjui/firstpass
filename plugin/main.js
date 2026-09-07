@@ -2222,6 +2222,32 @@ async function hrSelectedWithTrack(sequence) {
 }
 async function hrSelectedClip(sequence) { return (await hrSelectedWithTrack(sequence)).clip; }
 
+// The clip Headroom operates on: the SELECTION if there is one, otherwise the
+// topmost non-overlay clip under the playhead — so the tab keeps working when
+// a click elsewhere silently dropped the selection.
+async function hrTargetWithTrack(sequence) {
+  try { return await hrSelectedWithTrack(sequence); } catch (_) {}
+  const CLIP = ppro.Constants?.TrackItemType?.Clip ?? 1;
+  const ph = await sequence.getPlayerPosition().catch(() => null);
+  const t = ph ? ph.seconds : 0;
+  let vCount = 1; try { vCount = await sequence.getVideoTrackCount(); } catch (_) {}
+  for (let vt = vCount - 1; vt >= 0; vt--) {
+    const trk = await sequence.getVideoTrack(vt).catch(() => null);
+    if (!trk) continue;
+    for (const it of (await trk.getTrackItems(CLIP, false) || [])) {
+      let st = 0, du = 0, mp = null;
+      try { const v = await it.getStartTime(); st = v ? v.seconds : 0; } catch (_) {}
+      try { const v = await it.getDuration();  du = v ? v.seconds : 0; } catch (_) {}
+      if (t < st || t >= st + du) continue;
+      try { const rc = ppro.ClipProjectItem.cast(await it.getProjectItem()); mp = rc ? await rc.getMediaFilePath() : null; } catch (_) {}
+      if (mp && HR_OVERLAY_RE.test(mp)) continue;
+      return { clip: it, trackIdx: vt };
+    }
+  }
+  throw new Error("No clip under the playhead — select your talking head or move the playhead over it.");
+}
+async function hrTargetClip(sequence) { return (await hrTargetWithTrack(sequence)).clip; }
+
 // Our own rendered overlays must never become the preview background.
 const HR_OVERLAY_RE = /sample-graphics|graphics\/out|firstpass/i;
 
@@ -2556,7 +2582,7 @@ async function hrApplyInner(P) {
   const sequence = project && await project.getActiveSequence();
   if (!sequence) throw new Error("No active sequence — open your timeline.");
   P.v = "find selected clip";
-  const clip = await hrSelectedClip(sequence);
+  const clip = await hrTargetClip(sequence);
   P.v = "read Motion params";
   const { pos, scale, crop } = await hrMotionParams(clip);
   let { fx, fy, scalePct, durSec } = hrUiChoice();
@@ -2638,7 +2664,7 @@ async function hrApplyInner(P) {
       const m = await hrApplyMatte(seqT + effDur);
       if (m) matteNote = m.popupSet
         ? (hrShapeMode === "circle" ? ` · circled (matte V${m.track + 1})` : ` · corners rounded (matte V${m.track + 1})`)
-        : ` · matte on V${m.track + 1} — set Track Matte Key ▸ Matte to it`;
+        : ` · matte on V${m.track + 1} — set Track Matte Key ▸ Matte to it (${m.info || "popup write refused"})`;
     } catch (e) { matteNote = ` · rounding skipped: ${e.message}`; }
   }
   toast((effDur > 0
@@ -2651,7 +2677,7 @@ async function hrZoom(targetPct) {
   const project = await ppro.Project.getActiveProject();
   const sequence = project && await project.getActiveSequence();
   if (!sequence) throw new Error("No active sequence — open your timeline.");
-  const clip = await hrSelectedClip(sequence);
+  const clip = await hrTargetClip(sequence);
   const { pos, scale } = await hrMotionParams(clip);
   const { durSec } = hrUiChoice();
   // Keyframes live in clip SOURCE time — map the playhead into the clip.
@@ -2709,7 +2735,7 @@ async function hrAddEffect(re, label) {
   const project = await ppro.Project.getActiveProject();
   const sequence = project && await project.getActiveSequence();
   if (!sequence) throw new Error("No active sequence — open your timeline.");
-  const clip = await hrSelectedClip(sequence);
+  const clip = await hrTargetClip(sequence);
   const { display, match } = await hrFxNames();
 
   let name = null;
@@ -2772,16 +2798,15 @@ async function hrRefreshFrame() {
   const playhead = await sequence.getPlayerPosition().catch(() => null);
   const t = playhead ? playhead.seconds : 0;
 
-  let sel = null;
-  try { sel = await hrSelectedClip(sequence); } catch (_) {}
+  let sel = null, selTrack = Infinity;
+  try { const tw = await hrTargetWithTrack(sequence); sel = tw.clip; selTrack = tw.trackIdx; } catch (_) {}
   const selMeta = sel ? await hrClipMeta(sel, t) : null;
 
   // scene = what's BEHIND the selection: lowest clip on a LOWER track at the
   // playhead (our rendered overlays excluded). Nothing below ⇒ the sequence
   // background truly is black, so show black — never the clip itself.
   const CLIP = ppro.Constants?.TrackItemType?.Clip ?? 1;
-  let selIdx = Infinity;
-  try { selIdx = sel ? (await hrSelectedWithTrack(sequence)).trackIdx : Infinity; } catch (_) {}
+  const selIdx = selTrack;
   let bgMeta = null;
   outer:
   for (let vt = 0; vt < Math.min(selIdx, 99); vt++) {
@@ -2994,7 +3019,7 @@ async function hrApplyMatte(startSeqOpt) {
   const project = await ppro.Project.getActiveProject();
   const sequence = project && await project.getActiveSequence();
   if (!sequence) throw new Error("No active sequence — open your timeline.");
-  const clip = await hrSelectedClip(sequence);
+  const clip = await hrTargetClip(sequence);
   const rect = await sequence.getFrameSize().catch(() => null);
   if (!rect) throw new Error("Couldn't read the sequence frame size.");
 
@@ -3051,21 +3076,35 @@ async function hrApplyMatte(startSeqOpt) {
         if (/track\s*matte/i.test(mn)) { comp = c; break; }
       }
     }
+    let popupOk = false, popupInfo = "";
     if (comp) {
       const pc = await comp.getParamCount();
+      const cand = [];
       for (let i = 0; i < pc; i++) {
         const p = await comp.getParam(i);
         const dn = String(p.displayName || "").toLowerCase();
-        if (dn.includes("matte") && !dn.includes("composite") && !dn.includes("using")) {
-          const kf = await hrMakeKf(p, matteTrack + 1);   // popup: Video N
-          await project.lockedAccess(() => project.executeTransaction((c) => {
-            try { c.addAction(p.createSetValueAction(kf, true)); }
-            catch (_) { c.addAction(p.createSetValueAction(kf)); }
-          }, "FirstPass: matte track"));
-          break;
+        if (dn === "matte") cand.unshift(p);
+        else if (dn.includes("matte") && !dn.includes("composite") && !dn.includes("using")) cand.push(p);
+      }
+      for (const p of cand) {
+        for (const val of [matteTrack + 1, matteTrack, matteTrack + 2]) {
+          try {
+            const kf = await hrMakeKf(p, val);
+            await project.lockedAccess(() => project.executeTransaction((c) => {
+              try { c.addAction(p.createSetValueAction(kf, true)); }
+              catch (_) { c.addAction(p.createSetValueAction(kf)); }
+            }, "FirstPass: matte track"));
+            await sleep(100);
+            const rb = await p.getStartValue().catch(() => null);
+            const got = rb && rb.value != null ? Number(rb.value) : null;
+            popupInfo = `wrote ${val}, reads ${got}`;
+            if (got === val) { popupOk = true; break; }
+          } catch (e) { popupInfo = e.message; }
         }
+        if (popupOk) break;
       }
     }
+    if (!popupOk) { overlayHide(); return { track: matteTrack, popupSet: false, info: popupInfo }; }
   } catch (err) {
     overlayHide();
     return { track: matteTrack, popupSet: false };
