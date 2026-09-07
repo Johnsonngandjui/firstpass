@@ -30,8 +30,11 @@ copyFileSync(resolve(specPath), resolve(HERE, "spec/active.json"));
 for (const g of spec.graphics) {
   const out = resolve(outDir, g.file);
   console.log(`\n▶ ${g.id} → ${g.file} (${g.durationSec}s @ ${g.startSec}s)`);
-  const r = spawnSync("npx", [
-    "remotion", "render", "src/index.ts", g.id, out,
+  // Invoke the local CLI via this node binary — `npx` isn't on the bare PATH
+  // the helper daemon inherits from launchd.
+  const r = spawnSync(process.execPath, [
+    resolve(HERE, "node_modules/@remotion/cli/remotion-cli.js"),
+    "render", "src/index.ts", g.id, out,
     "--codec=prores", "--prores-profile=4444",
     "--pixel-format=yuva444p10le",          // REQUIRED for the alpha channel
     "--muted",                              // graphics are silent — Remotion

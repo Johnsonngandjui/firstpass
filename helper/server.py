@@ -8,7 +8,7 @@ Dependencies (see requirements.txt):
   ffmpeg must be on PATH
 """
 
-import asyncio, json, os, re, shutil, subprocess, sys, tempfile, threading, urllib.parse, uuid, wave
+import asyncio, base64, json, os, re, shutil, subprocess, sys, tempfile, threading, urllib.parse, uuid, wave
 import xml.sax.saxutils as _sx
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -78,6 +78,24 @@ class ProbeRequest(BaseModel):
 class SaveTranscriptRequest(BaseModel):
     transcript: dict          # post-reorder transcript (final timeline timings)
     seq_name:   str           # sequence name → <seq_name>.json
+
+class FrameGrabRequest(BaseModel):
+    media_path: str           # source file of the clip under the playhead
+    time_sec:   float = 0.0   # SOURCE time (clip inPoint + playhead offset)
+
+class RenderHighlightRequest(BaseModel):
+    # focus box, as fractions of the frame
+    x: float; y: float; w: float; h: float
+    color:     str   = "#f5f5f5"
+    thickness: float = 6.0
+    radius:    float = 18.0
+    dim:       float = 0.5        # 0..1 opacity of the outside dim
+    style:     str   = "fade"     # fade | draw | wipe
+    in_frames:   int = 24
+    hold_frames: int = 90
+    out_frames:  int = 24
+    width:  int = 1920
+    height: int = 1080
 
 
 # ── Health ─────────────────────────────────────────────────────────────────
@@ -188,6 +206,79 @@ def read_transcript(name: str):
         raise
     except Exception as e:
         raise HTTPException(500, str(e))
+
+
+# ── Headroom: frame grab + highlight rendering ───────────────────────────────
+# The panel embeds a still of the frame under the playhead so the user can drag
+# destination/focus boxes on it (UXP has no program-monitor interaction). The
+# still comes straight from the SOURCE media via ffmpeg — no Premiere export.
+@app.post("/frame_grab")
+def frame_grab(req: FrameGrabRequest):
+    if not FFMPEG:
+        raise HTTPException(500, "ffmpeg unavailable")
+    if not Path(req.media_path).exists():
+        raise HTTPException(400, f"Media not found: {req.media_path}")
+    t = max(0.0, float(req.time_sec))
+    out = Path(tempfile.gettempdir()) / "firstpass_frame.jpg"
+    cmd = [FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-ss", f"{t:.3f}",
+           "-i", req.media_path, "-frames:v", "1", "-vf", "scale=640:-2",
+           "-q:v", "4", "-y", str(out)]
+    r = subprocess.run(cmd, capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
+    if r.returncode != 0 or not out.exists():
+        raise HTTPException(500, f"frame grab failed: {r.stderr.decode()[:200]}")
+    b64 = base64.b64encode(out.read_bytes()).decode()
+    return {"ok": True, "data_url": f"data:image/jpeg;base64,{b64}"}
+
+
+def _resolve_node() -> Optional[str]:
+    """node for the Remotion render — launchd PATH is bare, so check the spots."""
+    found = shutil.which("node")
+    if found:
+        return found
+    for p in ("/usr/local/bin/node", "/opt/homebrew/bin/node"):
+        if Path(p).exists():
+            return p
+    return None
+
+
+_GRAPHICS_DIR = Path(__file__).resolve().parent.parent / "graphics"
+
+
+@app.post("/render_highlight")
+def render_highlight(req: RenderHighlightRequest):
+    """Render a highlight overlay (dim outside + outlined focus box, animated)
+    through the Remotion pipeline and return the file for the panel to place."""
+    node = _resolve_node()
+    if not node:
+        raise HTTPException(500, "node not found — install Node.js to render highlights")
+    if not (_GRAPHICS_DIR / "render.mjs").exists():
+        raise HTTPException(500, f"graphics pipeline missing at {_GRAPHICS_DIR}")
+    fps = 30
+    dur = round((req.in_frames + req.hold_frames + req.out_frames) / fps, 3)
+    spec = {
+        "version": 1,
+        "sourceTranscript": "(headroom highlight)",
+        "sequence": {"name": "Headroom Highlight", "frameWidth": req.width,
+                     "frameHeight": req.height, "fps": 29.97},
+        "graphics": [{
+            "id": "hl", "template": "highlight", "file": "highlight.mov",
+            "startSec": 0, "durationSec": dur, "label": "headroom highlight",
+            "props": {"x": req.x, "y": req.y, "w": req.w, "h": req.h,
+                      "color": req.color, "thickness": req.thickness,
+                      "radius": req.radius, "dim": req.dim, "style": req.style,
+                      "inFrames": req.in_frames, "outFrames": req.out_frames},
+        }],
+    }
+    spec_path = _GRAPHICS_DIR / "spec" / "__headroom_highlight.json"
+    spec_path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
+    out_dir = _GRAPHICS_DIR / "out" / "headroom"
+    r = subprocess.run([node, "render.mjs", str(spec_path), str(out_dir)],
+                       cwd=str(_GRAPHICS_DIR), capture_output=True, timeout=600)
+    mov = out_dir / "highlight.mov"
+    if r.returncode != 0 or not mov.exists():
+        tail = (r.stderr or r.stdout or b"").decode()[-400:]
+        raise HTTPException(500, f"highlight render failed: {tail}")
+    return {"ok": True, "file": str(mov), "duration_sec": dur}
 
 
 @app.post("/plan_flow")

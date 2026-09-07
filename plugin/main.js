@@ -2327,9 +2327,17 @@ async function hrApply() {
   if (!sequence) throw new Error("No active sequence — open your timeline.");
   const clip = await hrSelectedClip(sequence);
   const { pos, scale } = await hrMotionParams(clip);
-  const { fx, fy, scalePct, durSec } = hrUiChoice();
+  let { fx, fy, scalePct, durSec } = hrUiChoice();
 
-  // Full = center at 100%; otherwise the chosen grid cell at the chosen size.
+  // A dragged Destination box beats the grid: its center is the position, its
+  // height fraction is the scale (a full-frame source at S% is S% tall).
+  if (hrMode() === "dest" && hrBox) {
+    fx = hrBox.x + hrBox.w / 2;
+    fy = hrBox.y + hrBox.h / 2;
+    scalePct = Math.max(5, Math.round(hrBox.h * 100));
+  }
+
+  // Full = center at 100%; otherwise the chosen cell/box at the chosen size.
   const wantFull = scalePct >= 100;
   const tx = wantFull ? 0.5 : fx, ty = wantFull ? 0.5 : fy;
 
@@ -2364,12 +2372,47 @@ async function hrZoom(targetPct) {
   const sequence = project && await project.getActiveSequence();
   if (!sequence) throw new Error("No active sequence — open your timeline.");
   const clip = await hrSelectedClip(sequence);
-  const { scale } = await hrMotionParams(clip);
+  const { pos, scale } = await hrMotionParams(clip);
   const { durSec } = hrUiChoice();
   const playhead = await sequence.getPlayerPosition().catch(() => null);
   const t0 = playhead ? playhead.seconds : 0;
-  await hrDrive(project, scale, targetPct, t0, Math.max(durSec, 0.3));
-  toast(`Zooming to ${targetPct}% at the playhead. (Cmd+Z to undo.)`);
+  const dur = Math.max(durSec, 0.3);
+
+  // With a Zoom point set, push TOWARD it: scale to S while moving Position so
+  // the clicked point lands centered — pos_end = C − (P − C)·S, same space as
+  // the clip's own Position value (normalized or pixels, discovered live).
+  if (hrPoint && targetPct > 100) {
+    const S = targetPct / 100;
+    const curPosRaw = await hrCurrentValue(pos);
+    const curXY = hrReadXY(curPosRaw);
+    if (curXY) {
+      let cx = 0.5, cy = 0.5, px = hrPoint.x, py = hrPoint.y;
+      if (Math.abs(curXY[0]) > 2 || Math.abs(curXY[1]) > 2) {
+        const rect = await sequence.getFrameSize().catch(() => null);
+        if (rect) { cx = rect.width / 2; cy = rect.height / 2; px = hrPoint.x * rect.width; py = hrPoint.y * rect.height; }
+      }
+      const target = hrMakeXY(curPosRaw, cx - (px - cx) * S, cy - (py - cy) * S);
+      await hrDrive(project, pos, target, t0, dur);
+      await sleep(100);
+    }
+  } else if (targetPct <= 100) {
+    // Reset also brings the frame back to center.
+    const curPosRaw = await hrCurrentValue(pos);
+    const curXY = hrReadXY(curPosRaw);
+    if (curXY) {
+      let cx = 0.5, cy = 0.5;
+      if (Math.abs(curXY[0]) > 2 || Math.abs(curXY[1]) > 2) {
+        const rect = await sequence.getFrameSize().catch(() => null);
+        if (rect) { cx = rect.width / 2; cy = rect.height / 2; }
+      }
+      await hrDrive(project, pos, hrMakeXY(curPosRaw, cx, cy), t0, dur);
+      await sleep(100);
+    }
+  }
+  await hrDrive(project, scale, targetPct, t0, dur);
+  toast(hrPoint && targetPct > 100
+    ? `Zooming to ${targetPct}% toward your point. (Cmd+Z to undo.)`
+    : `Zooming to ${targetPct}% at the playhead. (Cmd+Z to undo.)`);
 }
 
 // Frame styles = real effects appended to the clip's component chain. Effect
@@ -2415,6 +2458,208 @@ async function hrAddEffect(re, label) {
   toast(`${label} added — tune it in Effect Controls. (Cmd+Z to undo.)`);
 }
 
+// ── Frame picker ─────────────────────────────────────────────────────────────
+// UXP has no program-monitor interaction, so we do what the pros do: embed a
+// STILL of the frame under the playhead (grabbed from the source media by the
+// helper) and let the user drag boxes / click points on that.
+let hrBox = null;     // {x,y,w,h} fractions — Destination or Focus box
+let hrPoint = null;   // {x,y} fractions — Zoom point
+
+function hrMode() {
+  const a = $('.segmented[data-group="hr-mode"] .seg.active');
+  return a ? a.dataset.val : "dest";
+}
+
+// Clip to photograph: the selection if any, else the TOPMOST clip under the
+// playhead (what the viewer actually sees).
+async function hrFrameClip(sequence, t) {
+  try { return await hrSelectedClip(sequence); } catch (_) {}
+  const CLIP = ppro.Constants?.TrackItemType?.Clip ?? 1;
+  let vCount = 1; try { vCount = await sequence.getVideoTrackCount(); } catch (_) {}
+  for (let vt = vCount - 1; vt >= 0; vt--) {
+    const trk = await sequence.getVideoTrack(vt).catch(() => null);
+    if (!trk) continue;
+    for (const it of (await trk.getTrackItems(CLIP, false) || [])) {
+      let st = 0, du = 0;
+      try { const s = await it.getStartTime(); st = s ? s.seconds : 0; } catch (_) {}
+      try { const d = await it.getDuration();  du = d ? d.seconds : 0; } catch (_) {}
+      if (t >= st && t < st + du) return it;
+    }
+  }
+  throw new Error("No clip under the playhead.");
+}
+
+async function hrRefreshFrame() {
+  hrStatus("");
+  const project = await ppro.Project.getActiveProject();
+  const sequence = project && await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence — open your timeline.");
+  const playhead = await sequence.getPlayerPosition().catch(() => null);
+  const t = playhead ? playhead.seconds : 0;
+  const clip = await hrFrameClip(sequence, t);
+
+  let mp = null, inS = 0, st = 0;
+  try { const rc = ppro.ClipProjectItem.cast(await clip.getProjectItem()); mp = rc ? await rc.getMediaFilePath() : null; } catch (_) {}
+  if (!mp) throw new Error("Couldn't resolve the clip's source file.");
+  try { const p = await clip.getInPoint();   inS = p ? p.seconds : 0; } catch (_) {}
+  try { const s = await clip.getStartTime(); st = s ? s.seconds : 0; } catch (_) {}
+  const srcTime = Math.max(0, inS + (t - st));
+
+  const r = await fetch(`${HELPER}/frame_grab`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ media_path: mp, time_sec: srcTime })
+  });
+  if (!r.ok) throw new Error("Frame grab failed — is the helper running?");
+  const data = await r.json();
+  $("#hr-frame").src = data.data_url;
+  $("#hr-frame-wrap").style.display = "block";
+  const hint = $("#hr-frame-hint");
+  if (hint) hint.textContent = "Frame loaded — drag a box (Destination/Focus) or click a point (Zoom).";
+}
+
+function hrRenderOverlays() {
+  const wrap = $("#hr-frame-wrap"), box = $("#hr-box"), pt = $("#hr-point");
+  if (!wrap || !box || !pt) return;
+  const W = wrap.clientWidth, H = wrap.clientHeight;
+  if (hrBox) {
+    box.style.display = "block";
+    box.style.left = (hrBox.x * W) + "px";  box.style.top = (hrBox.y * H) + "px";
+    box.style.width = (hrBox.w * W) + "px"; box.style.height = (hrBox.h * H) + "px";
+  } else box.style.display = "none";
+  if (hrPoint) {
+    pt.style.display = "block";
+    pt.style.left = (hrPoint.x * W) + "px"; pt.style.top = (hrPoint.y * H) + "px";
+  } else pt.style.display = "none";
+  const zt = $("#hr-zoom-target");
+  if (zt) zt.textContent = hrPoint
+    ? `Target: ${Math.round(hrPoint.x * 100)}%, ${Math.round(hrPoint.y * 100)}%`
+    : "Target: center";
+}
+
+(function hrWireFramePicker() {
+  const wrap = $("#hr-frame-wrap");
+  if (!wrap) return;
+  const clamp01 = (v) => Math.max(0, Math.min(1, v));
+  let drag = null;  // { kind: "new"|"move"|"resize", sx, sy, box0 }
+  const fracs = (e) => {
+    const r = wrap.getBoundingClientRect();
+    return { x: clamp01((e.clientX - r.left) / r.width), y: clamp01((e.clientY - r.top) / r.height) };
+  };
+  wrap.addEventListener("pointerdown", (e) => {
+    const f = fracs(e);
+    if (hrMode() === "zoom") { hrPoint = f; hrRenderOverlays(); return; }
+    const onHandle = e.target && e.target.id === "hr-box-handle";
+    const inBox = hrBox && f.x >= hrBox.x && f.x <= hrBox.x + hrBox.w && f.y >= hrBox.y && f.y <= hrBox.y + hrBox.h;
+    if (onHandle && hrBox)      drag = { kind: "resize", sx: f.x, sy: f.y, box0: { ...hrBox } };
+    else if (inBox)             drag = { kind: "move",   sx: f.x, sy: f.y, box0: { ...hrBox } };
+    else { hrBox = { x: f.x, y: f.y, w: 0, h: 0 }; drag = { kind: "new", sx: f.x, sy: f.y, box0: { ...hrBox } }; }
+    wrap.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+  wrap.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    const f = fracs(e), dx = f.x - drag.sx, dy = f.y - drag.sy, b0 = drag.box0;
+    if (drag.kind === "new")
+      hrBox = { x: Math.min(drag.sx, f.x), y: Math.min(drag.sy, f.y), w: Math.abs(dx), h: Math.abs(dy) };
+    else if (drag.kind === "move")
+      hrBox = { ...b0, x: clamp01(Math.min(b0.x + dx, 1 - b0.w)), y: clamp01(Math.min(b0.y + dy, 1 - b0.h)) };
+    else
+      hrBox = { ...b0, w: Math.max(0.03, Math.min(b0.w + dx, 1 - b0.x)), h: Math.max(0.03, Math.min(b0.h + dy, 1 - b0.y)) };
+    hrRenderOverlays();
+  });
+  const end = () => {
+    if (drag && drag.kind === "new" && hrBox && (hrBox.w < 0.02 || hrBox.h < 0.02)) { hrBox = null; hrRenderOverlays(); }
+    drag = null;
+  };
+  wrap.addEventListener("pointerup", end);
+  wrap.addEventListener("pointercancel", end);
+})();
+
+// ── Create highlight ─────────────────────────────────────────────────────────
+// The helper renders the overlay (dim outside + outlined focus box) through the
+// Remotion pipeline, then we import it and drop it on a new top track at the
+// playhead — the same placement path the Graphics tab uses.
+async function hrPlaceFile(path, durSec, startSec) {
+  const project = await ppro.Project.getActiveProject();
+  const sequence = project && await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence.");
+  const SE = ppro.SequenceEditor;
+  const editor = SE && SE.getEditor(sequence);
+  if (!editor || typeof editor.createOverwriteItemAction !== "function")
+    throw new Error("Timeline editor API missing.");
+  const mkTT = (s) => {
+    const v = Number(s);
+    if (!isFinite(v) || v < 0) throw new Error(`invalid time ${s}`);
+    return ppro.TickTime.createWithSeconds(Math.round(v * 1000) / 1000);
+  };
+  const root = await project.getRootItem();
+  const rootFolder = ppro.FolderItem.cast(root);
+  await project.importFiles([path], true, rootFolder, false);
+  await sleep(200);
+  let rawItem = null;
+  for (const it of (rootFolder ? await rootFolder.getItems() : [])) {
+    let mp = null;
+    try { const sc = ppro.ClipProjectItem.cast(it); mp = sc ? await sc.getMediaFilePath() : null; } catch (_) {}
+    if (mp === path) { rawItem = it; break; }
+  }
+  if (!rawItem) throw new Error("Rendered overlay didn't import.");
+  const trackIndex = await mgResolveTrack(ppro, project, sequence, editor);
+  const srcClip = ppro.ClipProjectItem.cast(rawItem);
+  if (srcClip && typeof srcClip.createSetInOutPointsAction === "function") {
+    await project.lockedAccess(() => project.executeTransaction((c) => {
+      c.addAction(srcClip.createSetInOutPointsAction(mkTT(0), mkTT(durSec)));
+    }, "FirstPass: trim highlight"));
+  }
+  await project.lockedAccess(() => project.executeTransaction((c) => {
+    c.addAction(editor.createOverwriteItemAction(rawItem, mkTT(startSec), trackIndex, 0));
+  }, "FirstPass: place highlight"));
+}
+
+async function hrCreateHighlight() {
+  hrStatus("");
+  if (!hrBox || hrBox.w < 0.02 || hrBox.h < 0.02)
+    throw new Error("Draw a Focus box on the frame first (mode: Focus box).");
+  const project = await ppro.Project.getActiveProject();
+  const sequence = project && await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence — open your timeline.");
+  const rect = await sequence.getFrameSize().catch(() => null);
+  if (!rect) throw new Error("Couldn't read the sequence frame size.");
+  const playhead = await sequence.getPlayerPosition().catch(() => null);
+  const t0 = playhead ? playhead.seconds : 0;
+
+  const style = ($('.segmented[data-group="hr-hlstyle"] .seg.active') || {}).dataset?.val || "fade";
+  const speed = Number(($('.segmented[data-group="hr-hlspeed"] .seg.active') || {}).dataset?.val || 24);
+  const color = ($("#hr-hlcolor") && $("#hr-hlcolor").value.trim()) || "#f5f5f5";
+  const dim   = Math.max(0, Math.min(1, (Number($("#hr-hldim")?.value) || 50) / 100));
+  const hold  = Math.max(1, Number($("#hr-hlhold")?.value) || 90);
+
+  overlayShow("Rendering your highlight");
+  overlayProgress(10, "Rendering the overlay locally…", "");
+  let data;
+  try {
+    const r = await fetch(`${HELPER}/render_highlight`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        x: hrBox.x, y: hrBox.y, w: hrBox.w, h: hrBox.h,
+        color, thickness: 6, radius: 18, dim, style,
+        in_frames: speed, hold_frames: hold, out_frames: speed,
+        width: Math.round(rect.width), height: Math.round(rect.height),
+      })
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || "Highlight render failed — is the helper running?");
+    }
+    data = await r.json();
+  } catch (err) { overlayHide(); throw err; }
+  overlayProgress(70, "Placing on the timeline…", "");
+  try {
+    await hrPlaceFile(data.file, data.duration_sec, t0);
+  } catch (err) { overlayHide(); throw err; }
+  overlayHide();
+  toast(`Highlight placed at the playhead · ${data.duration_sec}s. (Cmd+Z to undo.)`);
+}
+
 $$("#hr-grid .hr-pos").forEach((b) => b.addEventListener("click", () => {
   $$("#hr-grid .hr-pos").forEach((x) => x.classList.remove("active"));
   b.classList.add("active");
@@ -2429,6 +2674,10 @@ if (hrShadowBtn) hrShadowBtn.addEventListener("click", () =>
 const hrRoundedBtn = $("#hr-rounded");
 if (hrRoundedBtn) hrRoundedBtn.addEventListener("click", () =>
   withBusy(hrRoundedBtn, "Adding…", () => hrAddEffect(/rounded|round.*corner/i, "Rounded corners")));
+const hrRefreshBtn = $("#hr-refresh");
+if (hrRefreshBtn) hrRefreshBtn.addEventListener("click", () => withBusy(hrRefreshBtn, "Grabbing…", hrRefreshFrame));
+const hrHlBtn = $("#hr-hlcreate");
+if (hrHlBtn) hrHlBtn.addEventListener("click", () => withBusy(hrHlBtn, "Creating…", hrCreateHighlight));
 
 // ── AI Motion: keyframe engine (emphasis scale zoom) ─────────────
 // ADBE Motion, Scale = param index 1 (probed). We keyframe it. The exact

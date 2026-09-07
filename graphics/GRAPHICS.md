@@ -49,6 +49,7 @@ to timeline.
 | `chapterCard` | dim oversized number + tracked title | section breaks (signature) |
 | `figureCard` | stick figure draws itself in (`pose`: run/think/lift/victory/walk, `caption`) | playful/human moments |
 | `imageCard` | framed photo from `graphics/public/` (`image`, `caption`, `tilt`) | stills, memories |
+| `highlight` | dim-outside + outlined focus box (fade/draw/wipe) | machine-rendered by the helper for Headroom — not hand-authored |
 
 Typography variants: `punch` takes `style: "outline"` (hollow stroked letters);
 `thoughtCard` takes `voice: "editorial"` (serif italic, sentence case — quiet

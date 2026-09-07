@@ -10,6 +10,7 @@ import { ListStack } from "./templates/ListStack";
 import { LocationCard, TimeCard, ThoughtCard, DataCard, ChapterCard } from "./templates/VlogCards";
 import { FigureCard } from "./templates/FigureCard";
 import { ImageCard } from "./templates/ImageCard";
+import { Highlight } from "./templates/Highlight";
 
 // Remotion needs an integer-friendly fps; we render 30 and the ~0.1% drift vs a
 // 29.97 timeline is <5ms on clips this short (see graphics/GRAPHICS.md).
@@ -28,6 +29,8 @@ const TEMPLATES: Record<string, React.FC<any>> = {
   // art
   figureCard: FigureCard,
   imageCard: ImageCard,
+  // headroom overlays (rendered via the helper, not authored by hand)
+  highlight: Highlight,
 };
 
 export const RemotionRoot: React.FC = () => (
