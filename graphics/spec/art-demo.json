@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "sourceTranscript": "(demo — figures, voices, photo)",
+  "sequence": { "name": "Art Demo", "frameWidth": 3840, "frameHeight": 2160, "fps": 29.97 },
+  "graphics": [
+    { "id": "demo-figure", "template": "figureCard", "file": "art_figure.mov",
+      "startSec": 0, "durationSec": 3.2, "label": "stick figure · run",
+      "props": { "pose": "run", "caption": "RUN 04 · 5.2 MILES" } },
+    { "id": "demo-editorial", "template": "thoughtCard", "file": "art_editorial.mov",
+      "startSec": 4, "durationSec": 3.5, "label": "editorial serif thought",
+      "props": { "voice": "editorial", "lines": ["build a life", "you don't need to escape from."] } },
+    { "id": "demo-outline", "template": "punch", "file": "art_outline.mov",
+      "startSec": 8, "durationSec": 2.4, "label": "outline punch",
+      "props": { "eyebrow": "WANT", "word": "MORE.", "style": "outline" } },
+    { "id": "demo-photo", "template": "imageCard", "file": "art_photo.mov",
+      "startSec": 11, "durationSec": 3.0, "label": "photo card",
+      "props": { "image": "demo-photo.jpg", "caption": "05:41 AM" } }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "version": 2,
+  "sourceTranscript": "Nested Sequence 01 Copy 01.json",
+  "sequence": { "name": "Nested Sequence 01 Copy 01", "frameWidth": 3840, "frameHeight": 2160, "fps": 29.97 },
+  "graphics": [
+    {
+      "id": "g1-kicker",
+      "template": "lowerThird",
+      "file": "gfx_01_kicker.mov",
+      "startSec": 8.4,
+      "durationSec": 3.6,
+      "label": "kicker on the clean take · have we lost being nice?",
+      "props": { "eyebrow": "ON KINDNESS", "pre": "have we lost", "accent": "being nice?", "icon": "heart" }
+    },
+    {
+      "id": "g2-luxury",
+      "template": "punch",
+      "file": "gfx_02_luxury.mov",
+      "startSec": 20.4,
+      "durationSec": 2.2,
+      "label": "punch · a luxury. (outline, holds through the pause)",
+      "props": { "eyebrow": "THE COST", "word": "a luxury.", "style": "outline" }
+    },
+    {
+      "id": "g3-list",
+      "template": "listStack",
+      "file": "gfx_03_list.mov",
+      "startSec": 23.0,
+      "durationSec": 3.6,
+      "label": "list · rich/power/status",
+      "props": { "items": [
+        { "text": "RICH",   "icon": "dollar" },
+        { "text": "POWER",  "icon": "bolt" },
+        { "text": "STATUS", "icon": "crown" }
+      ] }
+    },
+    {
+      "id": "g4-thought",
+      "template": "thoughtCard",
+      "file": "gfx_04_thought.mov",
+      "startSec": 33.0,
+      "durationSec": 4.5,
+      "label": "editorial thought in the long silence",
+      "props": { "voice": "editorial", "lines": ["being nice", "shouldn't be a luxury."] }
+    },
+    {
+      "id": "g5-think",
+      "template": "figureCard",
+      "file": "gfx_05_think.mov",
+      "startSec": 43.4,
+      "durationSec": 3.0,
+      "label": "stick figure · sitting here thinking",
+      "props": { "pose": "think", "align": "right", "caption": "THINKING" }
+    }
+  ]
+}

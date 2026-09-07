@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "sourceTranscript": "(demo — showcases the five vlog cards)",
+  "sequence": { "name": "Vlog Language Demo", "frameWidth": 3840, "frameHeight": 2160, "fps": 29.97 },
+  "graphics": [
+    {
+      "id": "demo-location", "template": "locationCard", "file": "card_a_location.mov",
+      "startSec": 0, "durationSec": 3.0, "label": "A · location card",
+      "props": { "time": "06:14 AM", "place": "LYNN, MASSACHUSETTS" }
+    },
+    {
+      "id": "demo-time", "template": "timeCard", "file": "card_b_time.mov",
+      "startSec": 3, "durationSec": 2.5, "label": "B · time card",
+      "props": { "time": "5:00", "meridiem": "AM" }
+    },
+    {
+      "id": "demo-thought", "template": "thoughtCard", "file": "card_c_thought.mov",
+      "startSec": 6, "durationSec": 3.5, "label": "C · thought card",
+      "props": { "lines": ["DISCIPLINE", "IS FREEDOM"] }
+    },
+    {
+      "id": "demo-data", "template": "dataCard", "file": "card_d_data.mov",
+      "startSec": 10, "durationSec": 3.5, "label": "D · data card",
+      "props": { "rows": [
+        { "value": "5.2", "unit": "MI" },
+        { "value": "8:42", "unit": "/ MI" },
+        { "value": "152", "unit": "BPM" }
+      ] }
+    },
+    {
+      "id": "demo-chapter", "template": "chapterCard", "file": "card_e_chapter.mov",
+      "startSec": 14, "durationSec": 3.0, "label": "E · chapter card",
+      "props": { "number": "01", "title": "THE MORNING" }
+    }
+  ]
+}

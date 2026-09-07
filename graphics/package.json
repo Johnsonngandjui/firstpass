@@ -1,0 +1,19 @@
+{
+  "name": "firstpass-graphics",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Deterministic cinematic motion-graphics renderer: spec.json in, alpha ProRes + manifest.json out.",
+  "scripts": {
+    "render": "node render.mjs"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.290",
+    "remotion": "4.0.290",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.12",
+    "typescript": "5.5.4"
+  }
+}

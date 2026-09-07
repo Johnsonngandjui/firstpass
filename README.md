@@ -27,6 +27,7 @@ CrisperWhisper, and a 14B language model via Ollama.
 | **AI Flow** | Rebuilds your timeline into a story. Drops dead takes, groups topics, and **reorders it into an arc** with a hook, b-roll and pacing notes. Runs from Master's transcript, or transcribes by itself if you skip straight here. |
 | **AI Motion** | Punch-ins on the lines that carry weight, holding to the end of the thought, written as **real Motion/Scale keyframes**. Most shots stay still. Makes its own transcript if you haven't run Master. |
 | **Format** | Resize a sequence to Reels/TikTok, YouTube, or square. Click a size and it applies, in place or as a copy. |
+| **Graphics** | Motion graphics designed from your timeline's own words. Hit **Transcribe & export**, prompt Claude Code with `/motion-graphics do the whole thing for my latest sequence`, then pick the rendered folder — graphics land on a fresh top track. Silent alpha ProRes, minimal monochrome. |
 
 Every cut pass opens a word-level transcript first. Click any word to keep or cut it,
 and you see the estimated time saved before you commit.

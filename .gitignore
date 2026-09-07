@@ -33,3 +33,4 @@ helper/firstpass_state.json
 
 # accidental brace-expansion dir
 {plugin,helper}/
+sample-graphics/
