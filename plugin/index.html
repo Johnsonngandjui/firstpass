@@ -859,7 +859,7 @@ section[data-view="headroom"] .card { gap: 12px; }
       </nav>
 
       <div class="sidebar-foot">
-        <span class="version">v1.1.0 · b0907j</span>
+        <span class="version">v1.1.0 · b0907k</span>
       </div>
     </aside>
 
@@ -1134,7 +1134,7 @@ section[data-view="headroom"] .card { gap: 12px; }
           <p class="hint-note" id="hr-frame-hint" style="margin:0;">Refresh, then drag the clip where it should go.</p>
         </div>
 
-        <div class="card">
+        <div class="card" id="hr-card-place">
           <div class="card-title">Place and reshape the selected clip</div>
           <div class="hr-row2">
             <div class="hr-col grow">
@@ -1190,8 +1190,8 @@ section[data-view="headroom"] .card { gap: 12px; }
           </div>
         </div>
 
-        <div class="card">
-          <div class="card-title">Zoom <span style="opacity:.6;font-weight:400;">— animates at the playhead; set a Zoom point to push toward it</span></div>
+        <div class="card hidden" id="hr-card-zoom">
+          <div class="card-title">Zoom <span style="opacity:.6;font-weight:400;">— click the frame above to aim, then pick an amount</span></div>
           <div id="hr-zoom-target" class="hint-note" style="margin:0;">Target: center</div>
           <div class="action-bar">
             <div class="btn secondary hr-zoom" data-scale="115" role="button" tabindex="0">115%</div>
@@ -1201,9 +1201,15 @@ section[data-view="headroom"] .card { gap: 12px; }
             <span class="flex-spacer"></span>
             <div class="btn secondary hr-zoom" data-scale="100" role="button" tabindex="0">Reset 100%</div>
           </div>
+          <div class="hr-lbl">Speed</div>
+          <div class="segmented compact" data-group="hr-zdur">
+            <div class="seg" data-val="12" role="button" tabindex="0">Quick · 12f</div>
+            <div class="seg active" data-val="24" role="button" tabindex="0">Smooth · 24f</div>
+            <div class="seg" data-val="50" role="button" tabindex="0">Long · 50f</div>
+          </div>
         </div>
 
-        <div class="card">
+        <div class="card hidden" id="hr-card-high">
           <div class="card-title">Highlight <span style="opacity:.6;font-weight:400;">— draw a Focus box above, then create</span></div>
           <div class="action-bar">
             <div class="segmented compact" data-group="hr-hlstyle">
@@ -1230,7 +1236,7 @@ section[data-view="headroom"] .card { gap: 12px; }
           <p class="hint-note" style="margin:0;">Renders locally and lands on a new top track at the playhead.</p>
         </div>
 
-        <div class="card">
+        <div class="card" id="hr-card-style">
           <div class="card-title">Frame style</div>
           <div class="action-bar">
             <div class="btn secondary" id="hr-shadow" role="button" tabindex="0">Add shadow</div>

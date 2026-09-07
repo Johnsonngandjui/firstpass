@@ -2777,7 +2777,9 @@ async function hrZoom(targetPct) {
   if (!sequence) throw new Error("No active sequence — open your timeline.");
   const clip = await hrTargetClip(sequence);
   const { pos, scale } = await hrMotionParams(clip);
-  const { durSec } = hrUiChoice();
+  // Zoom speed lives on the Zoom card; the Move segmented is another tab's.
+  const zd = $('.segmented[data-group="hr-zdur"] .seg.active');
+  const durSec = zd ? Number(zd.dataset.val) / 30 : hrUiChoice().durSec;
   // Keyframes live in clip SOURCE time — map the playhead into the clip.
   const { t0, dur: durClamped } = await hrClipTimes(clip, sequence, Math.max(durSec, 0.3));
   const dur = Math.max(0.1, durClamped);
@@ -2925,7 +2927,13 @@ async function hrRefreshFrame() {
   if (!bgMeta && !selMeta) throw new Error("No clips under the playhead.");
   const rectAR = await sequence.getFrameSize().catch(() => null);
   const frameImg = $("#hr-frame"), wrapEl = $("#hr-frame-wrap");
-  if (bgMeta) {
+  if (hrMode() !== "dest" && selMeta && selMeta.mp) {
+    // Zoom and Focus aim at the CLIP itself — show its own frame. The
+    // behind-the-clip scene (Destination's background) is plain black on a
+    // single-track timeline, which made this preview useless for aiming.
+    frameImg.src = await hrGrab(selMeta.mp, selMeta.srcTime);
+    frameImg.style.display = "block";
+  } else if (bgMeta) {
     frameImg.src = await hrGrab(bgMeta.mp, bgMeta.srcTime);
     frameImg.style.display = "block";
   } else {
@@ -2971,17 +2979,35 @@ async function hrRefreshFrame() {
   hrSyncMode();
   hrRenderOverlays();
   const hint = $("#hr-frame-hint");
-  if (hint) hint.textContent = sel
-    ? "Destination loaded — drag the clip where it should go, or drag the handle to resize."
-    : "Scene loaded — select a clip for a Destination preview, or draw a Focus box / click a Zoom point.";
+  if (hint) {
+    const mode = hrMode();
+    hint.textContent =
+      mode === "zoom"  ? "Frame loaded — click the point you want to zoom toward." :
+      mode === "focus" ? "Frame loaded — drag a box around what to highlight." :
+      sel ? "Destination loaded — drag the clip where it should go, or drag the handle to resize."
+          : "Scene loaded — select a clip for a Destination preview.";
+  }
 }
 
-// Destination mode shows the clip's image in the box; Zoom/Focus keep it clean.
+// One tab, one job: each picker mode shows only its own controls, and the
+// Destination box thumbnail/chip only exist in Destination mode.
 function hrSyncMode() {
-  const dest = hrMode() === "dest";
+  const mode = hrMode();
+  const dest = mode === "dest";
   const img = $("#hr-box-img"), chip = $("#hr-box-chip");
   if (img)  img.style.display  = dest && img.src ? "block" : "none";
   if (chip) chip.style.display = dest ? "block" : "none";
+  const show = (sel, on) => { const el = $(sel); if (el) el.classList.toggle("hidden", !on); };
+  show("#hr-card-place", dest);
+  show("#hr-card-style", dest);
+  show("#hr-card-zoom",  mode === "zoom");
+  show("#hr-card-high",  mode === "focus");
+  const hint = $("#hr-frame-hint");
+  if (hint) hint.textContent =
+    mode === "zoom"  ? "Refresh, then click the point you want to zoom toward." :
+    mode === "focus" ? "Refresh, then drag a box around what to highlight." :
+                       "Refresh, then drag the clip where it should go.";
+  hrRenderOverlays();
 }
 
 let hrSeqAR = 9 / 16;                       // sequence height/width, set on refresh
@@ -2992,7 +3018,9 @@ function hrRenderOverlays() {
   // the preview ALWAYS holds the sequence aspect — never the image's whims
   wrap.style.height = Math.round((wrap.clientWidth || 300) * hrSeqAR) + "px";
   const W = wrap.clientWidth, H = wrap.clientHeight;
-  if (hrBox) {
+  // Zoom mode aims with the point — the Destination box is another tab's
+  // tool, so it hides (state stays; it's back when the tab is).
+  if (hrBox && hrMode() !== "zoom") {
     box.style.display = "block";
     box.style.left = (hrBox.x * W) + "px";  box.style.top = (hrBox.y * H) + "px";
     box.style.width = (hrBox.w * W) + "px"; box.style.height = (hrBox.h * H) + "px";
@@ -3436,7 +3464,13 @@ if (hrShadowBtn) hrShadowBtn.addEventListener("click", () =>
 const hrRefreshBtn = $("#hr-refresh");
 if (hrRefreshBtn) hrRefreshBtn.addEventListener("click", () => withBusy(hrRefreshBtn, "Grabbing…", hrRefreshFrame));
 $$('.segmented[data-group="hr-mode"] .seg').forEach((s) =>
-  s.addEventListener("click", () => setTimeout(hrSyncMode, 0)));
+  s.addEventListener("click", () => setTimeout(() => {
+    hrSyncMode();
+    // a loaded preview re-grabs for the new mode's source (clip vs scene)
+    const wrap = $("#hr-frame-wrap");
+    if (wrap && wrap.style.display === "block") hrRefreshFrame().catch(() => {});
+  }, 0)));
+hrSyncMode();   // initial: only the active mode's cards show
 const hrHlBtn = $("#hr-hlcreate");
 if (hrHlBtn) hrHlBtn.addEventListener("click", () => withBusy(hrHlBtn, "Creating…", hrCreateHighlight));
 
