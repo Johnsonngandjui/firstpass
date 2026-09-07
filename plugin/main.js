@@ -2997,9 +2997,11 @@ async function hrPlaceFile(path, durSec, startSec) {
   const trackIndex = await mgResolveTrack(ppro, project, sequence, editor);
   const srcClip = ppro.ClipProjectItem.cast(rawItem);
   if (srcClip && typeof srcClip.createSetInOutPointsAction === "function") {
-    await project.lockedAccess(() => project.executeTransaction((c) => {
-      c.addAction(srcClip.createSetInOutPointsAction(mkTT(0), mkTT(durSec)));
-    }, "FirstPass: trim highlight"));
+    try {
+      await project.lockedAccess(() => project.executeTransaction((c) => {
+        c.addAction(srcClip.createSetInOutPointsAction(mkTT(0), mkTT(durSec)));
+      }, "FirstPass: trim highlight"));
+    } catch (_) { /* stills may refuse an out-point — place at default length */ }
   }
   await project.lockedAccess(() => project.executeTransaction((c) => {
     c.addAction(editor.createOverwriteItemAction(rawItem, mkTT(startSec), trackIndex, 0));

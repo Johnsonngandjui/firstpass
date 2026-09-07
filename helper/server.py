@@ -293,23 +293,14 @@ def render_matte(req: RenderMatteRequest):
     bw, bh = max(4, int(req.w * W)), max(4, int(req.h * H))
     out_dir = _GRAPHICS_DIR / "out" / "headroom"
     out_dir.mkdir(parents=True, exist_ok=True)
-    png = out_dir / "matte.png"
-    mov = out_dir / "matte.mov"
-    import time as _t
-    _t0 = _t.time(); print(f"[matte] start {W}x{H}", flush=True)
+    # a PNG STILL, not video: Premiere reads straight alpha natively, stills
+    # trim to any length, and the old 1fps ProRes route made Premiere throw
+    # "error retrieving frame" beyond frame ~32. Unique name per render so
+    # Premiere's media cache never serves a stale matte.
+    import time as _tt
+    png = out_dir / f"matte_{int(_tt.time())}.png"
     _write_rounded_matte_png(png, W, H, bx, by, bw, bh, float(req.radius_px))
-    print(f"[matte] png done {_t.time()-_t0:.2f}s", flush=True)
-    dur = max(0.5, float(req.duration_sec))
-    # static content: 1 fps keeps encode time ~= seconds of duration, and
-    # Premiere renders a held frame identically to 30fps of the same pixels
-    cmd = [FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
-           "-loop", "1", "-framerate", "1", "-t", f"{dur:.3f}", "-i", str(png),
-           "-c:v", "prores_ks", "-profile:v", "4444", "-pix_fmt", "yuva444p10le", str(mov)]
-    r = subprocess.run(cmd, capture_output=True, timeout=300, stdin=subprocess.DEVNULL)
-    print(f"[matte] ffmpeg done {_t.time()-_t0:.2f}s rc={r.returncode}", flush=True)
-    if r.returncode != 0 or not mov.exists():
-        raise HTTPException(500, f"matte encode failed: {r.stderr.decode()[:200]}")
-    return {"ok": True, "file": str(mov), "duration_sec": dur}
+    return {"ok": True, "file": str(png), "duration_sec": max(0.5, float(req.duration_sec))}
 
 
 def _resolve_node() -> Optional[str]:
