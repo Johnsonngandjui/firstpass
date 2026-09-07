@@ -20,6 +20,7 @@
   "requiredPermissions": {
     "network": {
       "domains": ["http://localhost:7742"]
-    }
+    },
+    "localFileSystem": "fullAccess"
   }
 }

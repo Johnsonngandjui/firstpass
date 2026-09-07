@@ -75,6 +75,10 @@ class ApplyRequest(BaseModel):
 class ProbeRequest(BaseModel):
     media_path: str
 
+class SaveTranscriptRequest(BaseModel):
+    transcript: dict          # post-reorder transcript (final timeline timings)
+    seq_name:   str           # sequence name → <seq_name>.json
+
 
 # ── Health ─────────────────────────────────────────────────────────────────
 @app.get("/health")
@@ -132,6 +136,56 @@ def clear_state():
         if _STATE_PATH.exists():
             _STATE_PATH.unlink()
         return {"ok": True}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+# ── Post-reorder transcript export (input to the Motion Graphics step) ────────
+# The panel computes the reordered transcript with FINAL timeline timings and
+# posts it here; we drop it in the creator's Documents folder so a separate Claude
+# session can design motion graphics against it. The panel (UXP) is sandboxed and
+# can't write an arbitrary Documents path, so the write happens here.
+_TRANSCRIPT_DIR = Path.home() / "Documents" / "IG Reels Final" / "post reorder transcript"
+
+
+def _safe_name(name: str) -> str:
+    """A filesystem-safe stem from the sequence name (never empty)."""
+    cleaned = "".join(c if (c.isalnum() or c in " -_.") else "_" for c in (name or "")).strip()
+    return cleaned or "sequence"
+
+
+@app.post("/save_transcript")
+def save_transcript(req: SaveTranscriptRequest):
+    try:
+        _TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
+        path = _TRANSCRIPT_DIR / f"{_safe_name(req.seq_name)}.json"
+        path.write_text(json.dumps(req.transcript, indent=2), encoding="utf-8")
+        return {"ok": True, "path": str(path)}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/list_transcripts")
+def list_transcripts():
+    """Names of exported post-reorder transcripts (for tooling/read-back)."""
+    if not _TRANSCRIPT_DIR.exists():
+        return {"ok": True, "files": []}
+    return {"ok": True, "files": sorted(p.name for p in _TRANSCRIPT_DIR.glob("*.json"))}
+
+
+@app.get("/read_transcript")
+def read_transcript(name: str):
+    """Read one exported transcript back by filename. Dir-scoped: the resolved
+    path must stay inside _TRANSCRIPT_DIR (no traversal)."""
+    try:
+        path = (_TRANSCRIPT_DIR / name).resolve()
+        if _TRANSCRIPT_DIR.resolve() not in path.parents:
+            raise HTTPException(400, "path escapes transcript folder")
+        if not path.exists():
+            raise HTTPException(404, "not found")
+        return json.loads(path.read_text(encoding="utf-8"))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, str(e))
 

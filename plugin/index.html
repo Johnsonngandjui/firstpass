@@ -764,6 +764,17 @@ body {
           <span class="nav-txt">Motion</span>
         </div>
 
+        <div class="nav-item" data-view="motiongfx" title="Motion Graphics: drop story-fit graphics onto the timeline" role="button" tabindex="0">
+          <span class="nav-ico">
+            <svg viewBox="0 0 24 24" class="stroked" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="4" width="18" height="14" rx="2"/>
+              <path d="M3 15l4-4 3 3 4-5 4 4"/>
+              <path d="M8 22h8"/>
+            </svg>
+          </span>
+          <span class="nav-txt">Graphics</span>
+        </div>
+
         <!-- The repeats/filler/silence views still exist below (unreachable —
              no nav entry): Master reads its thresholds, filler list and backup
              toggles from their controls, so the sections stay in the DOM. -->
@@ -1009,6 +1020,26 @@ body {
 
         <div id="edit-status" class="ai-status hidden"></div>
         <div id="edit-result" class="hidden"></div>
+      </section>
+
+      <!-- ── Motion Graphics ────────────────────────────────── -->
+      <section class="view" data-view="motiongfx">
+        <header class="view-head">
+          <h1>Motion Graphics</h1>
+          <p>Adds the graphics a Claude session designed from your reordered transcript. Pick the folder it wrote, then drop them onto a new track at their story beats.</p>
+        </header>
+
+        <p class="hint-note">Step 1: <b>Transcribe &amp; export</b> writes this timeline's transcript to the export folder. Step 2: a Claude session designs graphics from it. Step 3: pick that folder and add them — they land on a fresh top track. <span style="opacity:.7;">(Cmd+Z undoes.)</span></p>
+
+        <div class="action-bar">
+          <div class="btn secondary" id="mg-transcribe" role="button" tabindex="0">Transcribe &amp; export</div>
+          <div class="btn secondary" id="mg-pick" role="button" tabindex="0">Pick graphics folder</div>
+          <span class="flex-spacer"></span>
+          <div class="btn primary" id="mg-apply" role="button" tabindex="0" aria-disabled="true">Add to timeline</div>
+        </div>
+
+        <div id="mg-status" class="ai-status hidden"></div>
+        <div id="mg-result" class="hidden"></div>
       </section>
 
       <!-- ── Settings ───────────────────────────────────────── -->

@@ -96,7 +96,7 @@ function showView(name) {
   $$(".view").forEach(v => v.classList.toggle("active", v.dataset.view === name));
   $$(".nav-item").forEach(n => n.classList.toggle("active", n.dataset.view === name));
   // Scope (Selected/Entire) only governs the cut passes — hide it where it's moot.
-  const noScope = name === "format" || name === "settings" || name === "review" || name === "flow" || name === "edit";
+  const noScope = name === "format" || name === "settings" || name === "review" || name === "flow" || name === "edit" || name === "motiongfx";
   const gb = $("#global-bar");
   if (gb) gb.classList.toggle("hidden", noScope);
   $("#content").scrollTop = 0;
@@ -1267,9 +1267,13 @@ async function assembleReorder(app, project, sequence, orderedSegs, onStep) {
 }
 
 // Apply the AI-Flow topic order to the timeline (re-assemble).
-async function applyReorder() {
-  if (!flowPlan || !flowSegs || !flowPlan.order || !flowPlan.order.length)
-    throw new Error("No arranged story to apply — run “Arrange story” first.");
+// Expand the arranged plan into the ordered, cut-subtracted, media-tagged source
+// spans the engine actually places — [{start,end,media}] in story order. Shared
+// by applyReorder (what it lays down) and buildReorderedTranscript (so exported
+// timings provably match the timeline). Each span, in `flowPlan.order`, is placed
+// contiguously from 0, so its final timeline start is the running sum of lengths.
+function buildOrderedSegs() {
+  if (!flowPlan || !flowSegs || !flowPlan.order || !flowPlan.order.length) return [];
 
   // A segment's [start,end] SPANS the gaps Master removed (silences, fillers,
   // earlier repeat takes). Placing the whole span from source would re-introduce
@@ -1304,9 +1308,17 @@ async function applyReorder() {
     if (b - a <= 0.03) continue;
     for (const sp of keptWithin(a, b, M)) {
       const cs = clamp(sp.start), ce = clamp(sp.end);
-      if (ce - cs > 0.03) orderedSegs.push({ start: cs, end: ce, media: M });
+      if (ce - cs > 0.03) orderedSegs.push({ start: cs, end: ce, media: M, id });
     }
   }
+  return orderedSegs;
+}
+
+async function applyReorder() {
+  if (!flowPlan || !flowSegs || !flowPlan.order || !flowPlan.order.length)
+    throw new Error("No arranged story to apply — run “Arrange story” first.");
+
+  const orderedSegs = buildOrderedSegs();
   if (!orderedSegs.length) throw new Error("Nothing to assemble — your arrangement is saved; try Arrange again.");
 
   const app = ppro;
@@ -1661,6 +1673,80 @@ function keptWords() {
 }
 const segById = (id) => (flowSegs || []).find(s => s.id === id);
 
+// ── Timeline transcript export (Motion Graphics is self-contained) ───────────
+// Reads the CURRENT timeline as it actually is: each placed clip maps its source
+// in/out onto its timeline position, so words land at their true final seconds —
+// works after Master, after a reorder, or after any manual edit. Transcribes
+// missing media first (ensureTranscript), then writes the JSON to the export
+// folder via the helper for a separate Claude session to design graphics against.
+async function buildTimelineTranscript() {
+  const r3 = (v) => Math.round(v * 1000) / 1000;
+  const project = await ppro.Project.getActiveProject();
+  const sequence = project && await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence — open your timeline.");
+  const CLIP = ppro.Constants?.TrackItemType?.Clip ?? 1;
+
+  const words = [];
+  let total = 0, clips = 0;
+  let vCount = 1; try { vCount = await sequence.getVideoTrackCount(); } catch (_) {}
+  for (let vt = 0; vt < vCount; vt++) {
+    const trk = await sequence.getVideoTrack(vt).catch(() => null);
+    if (!trk) continue;
+    for (const it of (await trk.getTrackItems(CLIP, false) || [])) {
+      let mp = null, inS = 0, du = 0, st = 0;
+      try { const rc = ppro.ClipProjectItem.cast(await it.getProjectItem()); mp = rc ? await rc.getMediaFilePath() : null; } catch (_) {}
+      try { const p = await it.getInPoint();   inS = p ? p.seconds : 0; } catch (_) {}
+      try { const d = await it.getDuration();  du = d ? d.seconds : 0; } catch (_) {}
+      try { const s = await it.getStartTime(); st = s ? s.seconds : 0; } catch (_) {}
+      if (!mp || du <= 0) continue;
+      clips++;
+      total = Math.max(total, st + du);
+      for (const w of allWords) {
+        if ((w._media || mp) !== mp) continue;
+        if (w.start < inS || w.start >= inS + du) continue;
+        words.push({ word: w.word, startSec: r3(st + (w.start - inS)), endSec: r3(st + (w.end - inS)) });
+      }
+    }
+  }
+  if (!clips) throw new Error("No clips on the timeline.");
+  words.sort((a, b) => a.startSec - b.startSec);
+  return { words, totalDurationSec: r3(total) };
+}
+
+async function mgExportTranscript() {
+  mgStatus("Checking transcript…");
+  const info = await getSequenceInfo();
+  await ensureTranscript((msg) => mgStatus(msg));   // transcribes missing media locally
+
+  mgStatus("Mapping words to the timeline…");
+  const { words, totalDurationSec } = await buildTimelineTranscript();
+  if (!words.length) throw new Error("No transcript words matched the clips on this timeline.");
+
+  let w = null, h = null, fps = null;
+  try { const rect = await info.sequence.getFrameSize(); if (rect) { w = Math.round(rect.width); h = Math.round(rect.height); } } catch (_) {}
+  try {
+    const r = await fetch(`${HELPER}/probe`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ media_path: info.mediaPath })
+    });
+    if (r.ok) { const p = await r.json(); fps = p.fps; if (w == null) { w = p.width; h = p.height; } }
+  } catch (_) {}
+
+  const transcript = {
+    version: 1, generatedAt: new Date().toISOString(),
+    sequence: { name: info.seqName, frameWidth: w, frameHeight: h, fps },
+    totalDurationSec, words,
+  };
+  const resp = await fetch(`${HELPER}/save_transcript`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ transcript, seq_name: info.seqName })
+  });
+  if (!resp.ok) throw new Error("Helper couldn't write the transcript — is the server running?");
+  const data = await resp.json();
+  mgStatus("");
+  toast(`Transcript saved · ${words.length} words → ${data.path || "export folder"}`);
+}
+
 // Flow and Motion work from Master's transcript, but they shouldn't strand
 // someone who came straight here. Transcription touches nothing on the
 // timeline, so when there's no transcript yet we simply make one and carry on
@@ -1877,6 +1963,233 @@ async function freeModels() {
 }
 const freeMemBtn = $("#free-mem");
 if (freeMemBtn) freeMemBtn.addEventListener("click", () => withBusy(freeMemBtn, "Freeing…", freeModels));
+
+// ── Motion Graphics: drop story-fit graphics onto the timeline ───────────────
+// A separate Claude session designs graphics from the exported post-reorder
+// transcript and writes them to a folder: MOV-with-alpha files + a manifest.json
+// mapping each file to { startSec, durationSec }. This tab reads that folder and
+// lays each graphic onto a NEW dedicated video track at its story beat — reusing
+// the reorder engine's import + overwrite scaffolding and its guards against
+// out-of-range TickTimes (a prime Premiere hard-crash trigger).
+const uxpStorage = require("uxp").storage;
+let mgFolder = null;      // the picked UXP folder (for nativePath)
+let mgManifest = null;    // validated graphics list
+
+function mgSetApplyEnabled(on) {
+  const b = $("#mg-apply");
+  if (!b) return;
+  if (on) b.removeAttribute("aria-disabled");
+  else b.setAttribute("aria-disabled", "true");
+}
+function mgStatus(msg, isErr) {
+  const s = $("#mg-status");
+  if (!s) return;
+  s.textContent = msg || "";
+  s.classList.toggle("hidden", !msg);
+  s.classList.toggle("err", !!isErr);
+}
+
+// Read + validate manifest.json from the picked folder → the graphics list, or
+// throw a clear message. Flags entries whose file is missing from the folder.
+async function mgLoadManifest(folder) {
+  const entries = await folder.getEntries();
+  const mEntry = entries.find(e => e.name === "manifest.json" && e.isFile);
+  if (!mEntry) throw new Error("No manifest.json in that folder — pick the folder Claude wrote.");
+  let data;
+  try { data = JSON.parse(await mEntry.read({ format: uxpStorage.formats.utf8 })); }
+  catch (_) { throw new Error("manifest.json isn't valid JSON."); }
+  const names = new Set(entries.filter(e => e.isFile).map(e => e.name));
+  const graphics = [];
+  for (const g of (Array.isArray(data.graphics) ? data.graphics : [])) {
+    if (!g || typeof g.file !== "string") continue;
+    const startSec = Number(g.startSec), durationSec = Number(g.durationSec);
+    if (!isFinite(startSec) || startSec < 0) continue;
+    if (!isFinite(durationSec) || durationSec <= 0) continue;
+    graphics.push({ file: g.file, startSec, durationSec, label: g.label || g.file, present: names.has(g.file) });
+  }
+  if (!graphics.length) throw new Error("manifest.json has no valid graphics entries.");
+  return graphics;
+}
+
+function mgRenderList(graphics) {
+  const box = $("#mg-result");
+  if (!box) return;
+  const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+  const P = [`<div class="flow-sec-title">Graphics (${graphics.length})</div>`];
+  graphics.forEach((g, i) => {
+    P.push(
+      `<div class="flow-seg${g.present ? "" : " dropped"}">` +
+      `<span class="idx">${i + 1}</span>` +
+      `<span class="txt">${escapeHtml(g.label)} <span style="opacity:.6">· ${fmt(g.startSec)} · ${g.durationSec.toFixed(1)}s</span></span>` +
+      (g.present ? "" : ` <span class="movedtag">missing file</span>`) +
+      `</div>`);
+  });
+  const missing = graphics.filter(g => !g.present).length;
+  if (missing) P.push(`<p class="hint-note warn" style="margin-top:8px;">${missing} file(s) named in the manifest aren't in the folder — those will be skipped.</p>`);
+  box.innerHTML = P.join("");
+  box.classList.remove("hidden");
+}
+
+async function mgPick() {
+  let folder;
+  try { folder = await uxpStorage.localFileSystem.getFolder(); } catch (_) { return; }
+  if (!folder) return;                                   // user cancelled
+  mgStatus("");
+  try {
+    const graphics = await mgLoadManifest(folder);
+    mgFolder = folder;
+    mgManifest = graphics;
+    mgRenderList(graphics);
+    mgSetApplyEnabled(graphics.some(g => g.present));
+  } catch (err) {
+    mgFolder = null; mgManifest = null;
+    mgSetApplyEnabled(false);
+    const rb = $("#mg-result"); if (rb) rb.classList.add("hidden");
+    mgStatus(err && err.message ? err.message : String(err), true);
+  }
+}
+
+// Find (or create) a fresh top video track for the graphics. Tries whatever
+// add-track primitive this build exposes; if none, uses an already-empty top
+// track; otherwise asks the user to add one — it never overwrites existing clips.
+async function mgResolveTrack(app, project, sequence, editor) {
+  const CLIP = app.Constants?.TrackItemType?.Clip ?? 1;
+  const countBefore = await sequence.getVideoTrackCount();
+  const isEmpty = async (idx) => {
+    try {
+      const trk = idx >= 0 ? await sequence.getVideoTrack(idx) : null;
+      const items = trk ? await trk.getTrackItems(CLIP, false) : [];
+      return !items || !items.length;
+    } catch (_) { return false; }
+  };
+
+  // 1. Try to add a new video track (method name varies by build; discover it).
+  const wanted = /(addvideotrack|createaddvideotrack|createaddtrack|createinserttrack|inserttrack|addtrack)/i;
+  const tryCall = async (owner, name) => {
+    try {
+      if (/^create/i.test(name)) {
+        await project.lockedAccess(() => project.executeTransaction((c) => { c.addAction(owner[name](1)); }, "FirstPass: add graphics track"));
+      } else {
+        await project.lockedAccess(() => { owner[name](1); });
+      }
+      return (await sequence.getVideoTrackCount()) > countBefore;
+    } catch (_) { return false; }
+  };
+  for (const owner of [editor, sequence]) {
+    for (const n of listAllMethods(owner).filter(x => wanted.test(x))) {
+      if (await tryCall(owner, n)) return countBefore;   // new track is the new top index
+    }
+  }
+
+  // 2. Fall back to an already-empty top track.
+  if (await isEmpty(countBefore - 1)) return countBefore - 1;
+
+  // 3. Nothing safe to write to.
+  throw new Error("No empty video track for the graphics. Add an empty video track above your clips, then try again.");
+}
+
+async function applyMotionGraphics() {
+  if (!mgManifest || !mgFolder) throw new Error("Pick a graphics folder first.");
+  const graphics = mgManifest.filter(g => g.present);
+  if (!graphics.length) throw new Error("None of the manifest's files are in the folder.");
+
+  const app = ppro;
+  const project = await app.Project.getActiveProject();
+  if (!project) throw new Error("No active project open.");
+  const sequence = await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence — open your timeline.");
+
+  const SE = app.SequenceEditor;
+  const editor = (SE && typeof SE.getEditor === "function") ? SE.getEditor(sequence) : null;
+  if (!editor || typeof editor.createOverwriteItemAction !== "function")
+    throw new Error("This Premiere build is missing the timeline editor API.");
+  if (typeof project.importFiles !== "function")
+    throw new Error("This Premiere build can't import files from the panel.");
+
+  const mkTT = (s) => {
+    const v = Number(s);
+    if (!isFinite(v) || v < 0) throw new Error(`invalid time ${s}`);
+    return app.TickTime.createWithSeconds(Math.round(v * 1000) / 1000);
+  };
+  const base = mgFolder.nativePath.replace(/[\/\\]+$/, "");
+  const sep = base.includes("\\") ? "\\" : "/";
+  const pathOf = (g) => base + sep + g.file;
+
+  overlayShow("Adding motion graphics");
+  overlayProgress(3, "Importing graphics…", "");
+
+  // Import all files in one call, then resolve each to its RAW ProjectItem — the
+  // cast ClipProjectItem is NOT accepted by the overwrite engine (see file top).
+  const root = await project.getRootItem();
+  const rootFolder = app.FolderItem.cast(root);
+  try {
+    await project.importFiles(graphics.map(pathOf), true, rootFolder, false);
+  } catch (_) {
+    overlayHide();
+    throw new Error("Couldn't import the graphics — check the folder and that the files are valid.");
+  }
+  await sleep(200);
+
+  const byPath = {};
+  try {
+    for (const it of (rootFolder ? await rootFolder.getItems() : [])) {
+      let mp = null;
+      try { const sc = app.ClipProjectItem.cast(it); mp = sc ? await sc.getMediaFilePath() : null; } catch (_) {}
+      if (mp) byPath[mp] = it;
+    }
+  } catch (_) {}
+
+  const trackIndex = await mgResolveTrack(app, project, sequence, editor);
+
+  let placed = 0, skipped = 0;
+  const total = graphics.length;
+  for (const g of graphics) {
+    const p = pathOf(g);
+    const rawItem = byPath[p] || byPath[p.replace(/\//g, "\\")] || null;
+    if (!rawItem) { skipped++; continue; }
+
+    // Clamp the in/out to the graphic's REAL length so we never set an out-point
+    // past the media end (out-of-range TickTime is a hard-crash trigger).
+    let dur = g.durationSec;
+    try {
+      const r = await fetch(`${HELPER}/probe`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ media_path: p })
+      });
+      if (r.ok) { const info = await r.json(); if (info.duration) dur = Math.min(g.durationSec, info.duration - 0.02); }
+    } catch (_) {}
+    if (!(dur > 0)) { skipped++; continue; }
+
+    try {
+      const srcClip = app.ClipProjectItem.cast(rawItem);
+      if (srcClip && typeof srcClip.createSetInOutPointsAction === "function") {
+        await project.lockedAccess(() => project.executeTransaction((c) => {
+          c.addAction(srcClip.createSetInOutPointsAction(mkTT(0), mkTT(dur)));
+        }, "FirstPass: trim graphic"));
+      }
+      // audio index 0: graphics are video-only — passing trackIndex there can
+      // target a nonexistent audio track and silently fail the whole action.
+      await project.lockedAccess(() => project.executeTransaction((c) => {
+        c.addAction(editor.createOverwriteItemAction(rawItem, mkTT(g.startSec), trackIndex, 0));
+      }, "FirstPass: place graphic"));
+      placed++;
+      overlayProgress(6 + (placed / total) * 90, `Placing graphic ${placed} of ${total}`, `${placed} / ${total}`);
+      await sleep(160);
+    } catch (_) { skipped++; await sleep(120); }
+  }
+
+  overlayHide();
+  if (!placed) throw new Error("Couldn't place any graphics — the timeline is unchanged.");
+  const extra = skipped ? ` · ${skipped} skipped` : "";
+  toast(`Added ${placed} graphic${placed === 1 ? "" : "s"} on a new track${extra}. (Cmd+Z to undo.)`);
+}
+
+const mgTranscribeBtn = $("#mg-transcribe");
+if (mgTranscribeBtn) mgTranscribeBtn.addEventListener("click", () => withBusy(mgTranscribeBtn, "Transcribing…", mgExportTranscript));
+const mgPickBtn = $("#mg-pick");
+if (mgPickBtn) mgPickBtn.addEventListener("click", () => withBusy(mgPickBtn, "Opening…", mgPick));
+const mgApplyBtn = $("#mg-apply");
+if (mgApplyBtn) mgApplyBtn.addEventListener("click", () => withBusy(mgApplyBtn, "Adding…", applyMotionGraphics));
 
 // ── AI Motion: keyframe engine (emphasis scale zoom) ─────────────
 // ADBE Motion, Scale = param index 1 (probed). We keyframe it. The exact
