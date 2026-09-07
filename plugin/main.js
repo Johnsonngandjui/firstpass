@@ -2259,14 +2259,34 @@ async function hrCurrentValue(param) {
 }
 
 // Value at a specific CLIP-SOURCE time (keyframe positions live in source
-// time — see applyScaleKeyframes, which keys at srcIn+offset). Falls back to
-// the start value on builds where getValueAtTime is unhappy.
-async function hrValueAt(param, tSec) {
+// time — see applyScaleKeyframes, which keys at srcIn+offset). On a param
+// with NO keyframes this build's getValueAtTime returns garbage (zero) — a
+// start keyframe written from that made clips shrink to nothing and fly in
+// from the corner. So every read passes a sanity gate and falls back to
+// getStartValue, then to an explicit default.
+function hrSane(v, kind) {
+  if (kind === "scale") {
+    const n = Number(v);
+    return (isFinite(n) && n >= 1 && n <= 10000) ? n : null;
+  }
+  const xy = hrReadXY(v);
+  if (!xy || !isFinite(xy[0]) || !isFinite(xy[1])) return null;
+  // Position must be plausibly on/near the canvas in either space: normalized
+  // values live in roughly -1..2; pixel values are > 2. Zero-zero with no
+  // keyframes set is this build's "garbage" tell for a centered clip.
+  return v;
+}
+async function hrValueAt(param, tSec, kind) {
+  let v = null;
   try {
     const vo = await param.getValueAtTime(ppro.TickTime.createWithSeconds(Math.max(0, tSec)));
-    if (vo && vo.value != null) return vo.value;
+    if (vo && vo.value != null) v = hrSane(vo.value, kind);
   } catch (_) {}
-  return hrCurrentValue(param);
+  if (v == null) {
+    try { const kf = await param.getStartValue(); if (kf && kf.value != null) v = hrSane(kf.value, kind); } catch (_) {}
+  }
+  if (v == null && kind === "scale") v = 100;
+  return v;
 }
 
 // The time conversion every Headroom write needs: sequence playhead → this
@@ -2361,7 +2381,7 @@ function hrSetVarying(project, param, on) {
 
 // Animate one param from its current value to `target` over dur seconds
 // starting at the playhead (dur 0 = set statically).
-async function hrDrive(project, param, target, t0, dur) {
+async function hrDrive(project, param, target, t0, dur, kind) {
   const mkTT = (s) => {
     const v = Number(s);
     if (!isFinite(v) || v < 0) throw new Error(`invalid time ${s}`);
@@ -2378,7 +2398,7 @@ async function hrDrive(project, param, target, t0, dur) {
     });
     return;
   }
-  const current = await hrValueAt(param, t0);
+  const current = await hrValueAt(param, t0, kind);
   await hrSetVarying(project, param, true);
   await sleep(80);
   if (current != null) await hrAddKf(project, param, current, mkTT(t0), true);
@@ -2396,6 +2416,59 @@ function hrUiChoice() {
     scalePct: size ? Number(size.dataset.val) : 33,
     durSec: dur ? Number(dur.dataset.val) : 0.5,
   };
+}
+
+// Reshape = the Crop effect, exactly how the reference tool does it (its
+// Effect Controls shows Crop Left/Top/Right/Bottom being driven). Width and
+// Height % become symmetric crop values; 100/100 means no crop to apply.
+async function hrEnsureCrop(project, clip, wPct, hPct) {
+  const L = Math.max(0, (100 - wPct) / 2), T = Math.max(0, (100 - hPct) / 2);
+  const chain = await clip.getComponentChain();
+  const findCrop = async () => {
+    const n = await chain.getComponentCount();
+    for (let i = 0; i < n; i++) {
+      const c = await chain.getComponentAtIndex(i);
+      const mn = typeof c.getMatchName === "function" ? await c.getMatchName() : "";
+      if (/crop/i.test(mn)) return c;
+    }
+    return null;
+  };
+  let comp = await findCrop();
+  if (!comp) {
+    if (L === 0 && T === 0) return;                    // nothing to crop, nothing to add
+    const F = ppro.VideoFilterFactory;
+    if (!F) throw new Error("This build doesn't expose effect creation.");
+    const match = (await F.getMatchNames().catch(() => null)) || [];
+    const name = match.find((m) => /crop/i.test(m));
+    if (!name) throw new Error("No Crop effect on this build.");
+    const fresh = await F.createComponent(name);
+    await project.lockedAccess(() => project.executeTransaction((c) => {
+      c.addAction(chain.createAppendComponentAction(fresh));
+    }, "FirstPass: add crop"));
+    await sleep(150);
+    comp = await findCrop();                            // write to the ATTACHED instance
+    if (!comp) throw new Error("Crop effect didn't attach.");
+  }
+  const wanted = { left: L, top: T, right: L, bottom: T };
+  const pc = await comp.getParamCount();
+  for (let i = 0; i < pc; i++) {
+    const p = await comp.getParam(i);
+    const dn = String(p.displayName || "").toLowerCase();
+    const key = Object.keys(wanted).find((k) => dn.includes(k));
+    if (key == null) continue;
+    const kf = await hrMakeKf(p, wanted[key]);
+    await project.lockedAccess(() => project.executeTransaction((c) => {
+      try { c.addAction(p.createSetValueAction(kf, true)); }
+      catch (_) { c.addAction(p.createSetValueAction(kf)); }
+    }, "FirstPass: crop value"));
+    await sleep(60);
+  }
+}
+
+function hrShapeChoice() {
+  const w = Math.max(10, Math.min(100, Number($("#hr-shape-w")?.value) || 100));
+  const h = Math.max(10, Math.min(100, Number($("#hr-shape-h")?.value) || 100));
+  return { w, h };
 }
 
 async function hrApply() {
@@ -2437,7 +2510,7 @@ async function hrApplyInner(P) {
   // Discover the position space from the clip's own current value: values ≤ 2
   // mean normalized (0..1); anything bigger means sequence pixels.
   P.v = "read Position value";
-  const curPosRaw = await hrValueAt(pos, t0);
+  const curPosRaw = await hrValueAt(pos, t0, "pos");
   const curXY = hrReadXY(curPosRaw);
   if (!curXY) throw new Error("Couldn't read this clip's Position value.");
   let px = tx, py = ty;
@@ -2449,10 +2522,15 @@ async function hrApplyInner(P) {
   const posTarget = hrMakeXY(curPosRaw, px, py);
 
   P.v = "write Position";
-  await hrDrive(project, pos, posTarget, t0, effDur);
+  await hrDrive(project, pos, posTarget, t0, effDur, "pos");
   await sleep(100);
   P.v = "write Scale";
-  await hrDrive(project, scale, scalePct, t0, effDur);
+  await hrDrive(project, scale, scalePct, t0, effDur, "scale");
+
+  // Reshape (Portrait/Wide or custom width/height) via the Crop effect.
+  P.v = "apply shape";
+  const { w: shapeW, h: shapeH } = hrShapeChoice();
+  if (shapeW < 100 || shapeH < 100) await hrEnsureCrop(project, clip, shapeW, shapeH);
 
   // Read the scale back at the landing keyframe — proof the move actually took
   // (the same self-check AI Motion runs).
@@ -2486,7 +2564,7 @@ async function hrZoom(targetPct) {
   // the clip's own Position value (normalized or pixels, discovered live).
   if (hrPoint && targetPct > 100) {
     const S = targetPct / 100;
-    const curPosRaw = await hrValueAt(pos, t0);
+    const curPosRaw = await hrValueAt(pos, t0, "pos");
     const curXY = hrReadXY(curPosRaw);
     if (curXY) {
       let cx = 0.5, cy = 0.5, px = hrPoint.x, py = hrPoint.y;
@@ -2495,12 +2573,12 @@ async function hrZoom(targetPct) {
         if (rect) { cx = rect.width / 2; cy = rect.height / 2; px = hrPoint.x * rect.width; py = hrPoint.y * rect.height; }
       }
       const target = hrMakeXY(curPosRaw, cx - (px - cx) * S, cy - (py - cy) * S);
-      await hrDrive(project, pos, target, t0, dur);
+      await hrDrive(project, pos, target, t0, dur, "pos");
       await sleep(100);
     }
   } else if (targetPct <= 100) {
     // Reset also brings the frame back to center.
-    const curPosRaw = await hrValueAt(pos, t0);
+    const curPosRaw = await hrValueAt(pos, t0, "pos");
     const curXY = hrReadXY(curPosRaw);
     if (curXY) {
       let cx = 0.5, cy = 0.5;
@@ -2508,11 +2586,11 @@ async function hrZoom(targetPct) {
         const rect = await sequence.getFrameSize().catch(() => null);
         if (rect) { cx = rect.width / 2; cy = rect.height / 2; }
       }
-      await hrDrive(project, pos, hrMakeXY(curPosRaw, cx, cy), t0, dur);
+      await hrDrive(project, pos, hrMakeXY(curPosRaw, cx, cy), t0, dur, "pos");
       await sleep(100);
     }
   }
-  await hrDrive(project, scale, targetPct, t0, dur);
+  await hrDrive(project, scale, targetPct, t0, dur, "scale");
   toast(hrPoint && targetPct > 100
     ? `Zooming to ${targetPct}% toward your point. (Cmd+Z to undo.)`
     : `Zooming to ${targetPct}% at the playhead. (Cmd+Z to undo.)`);
@@ -2766,6 +2844,13 @@ async function hrCreateHighlight() {
 $$("#hr-grid .hr-pos").forEach((b) => b.addEventListener("click", () => {
   $$("#hr-grid .hr-pos").forEach((x) => x.classList.remove("active"));
   b.classList.add("active");
+}));
+$$(".hr-shape").forEach((b) => b.addEventListener("click", () => {
+  $$(".hr-shape").forEach((x) => x.classList.remove("active"));
+  b.classList.add("active");
+  const w = $("#hr-shape-w"), h = $("#hr-shape-h");
+  if (w) w.value = b.dataset.w;
+  if (h) h.value = b.dataset.h;
 }));
 const hrApplyBtn = $("#hr-apply");
 if (hrApplyBtn) hrApplyBtn.addEventListener("click", () => withBusy(hrApplyBtn, "Moving…", hrApply));

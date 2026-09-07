@@ -1109,7 +1109,22 @@ section[data-view="headroom"] .card-title { margin-bottom: 2px; }
         </div>
 
         <div class="card">
-          <div class="card-title">Position</div>
+          <div class="card-title">Place and reshape the selected clip</div>
+          <div class="action-bar" style="margin-top:8px;">
+            <div class="btn secondary hr-shape active" data-w="100" data-h="100" role="button" tabindex="0">Full</div>
+            <div class="btn secondary hr-shape" data-w="58" data-h="100" role="button" tabindex="0">Portrait</div>
+            <div class="btn secondary hr-shape" data-w="100" data-h="62" role="button" tabindex="0">Wide</div>
+            <div class="btn secondary" aria-disabled="true" title="Premiere doesn't expose masks to panels — draw an ellipse mask in Effect Controls" role="button" tabindex="0">Circle</div>
+            <span class="flex-spacer"></span>
+          </div>
+          <div class="action-bar" style="margin-top:8px;">
+            <input id="hr-shape-w" class="hr-input" type="text" value="100" style="width:52px;" aria-label="Crop width percent" title="Width %" />
+            <span class="hr-input-lbl">width %</span>
+            <input id="hr-shape-h" class="hr-input" type="text" value="100" style="width:52px;" aria-label="Crop height percent" title="Height %" />
+            <span class="hr-input-lbl">height %</span>
+          </div>
+
+          <div class="card-title" style="margin-top:12px;">Position</div>
           <div id="hr-grid">
             <div class="btn secondary hr-pos" data-x="0.18" data-y="0.18" role="button" tabindex="0" aria-label="Top left">↖</div>
             <div class="btn secondary hr-pos" data-x="0.5"  data-y="0.18" role="button" tabindex="0" aria-label="Top center">↑</div>
