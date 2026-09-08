@@ -3534,7 +3534,7 @@ async function hrResetMotion() {
 // box, and enlarge it about its own center (the reference's "Pop selected
 // region" with its Center-on-focus default) — a magnified callout floating
 // over the dimmed highlight for exactly the highlight's duration.
-async function hrCreatePop(project, sequence, rect, tSeq, durSec, popPct) {
+async function hrCreatePop(project, sequence, rect, tSeq, durSec, popPct, popCenter, inFrames) {
   const clip = await hrTargetClip(sequence);
   const rawItem = await clip.getProjectItem();
   const srcClip = ppro.ClipProjectItem.cast(rawItem);
@@ -3588,16 +3588,24 @@ async function hrCreatePop(project, sequence, rect, tSeq, durSec, popPct) {
     await hrDrive(project, crop[k], Math.max(0, Math.min(95, cropT[k])), 0, 0, "pct");
     await sleep(60);
   }
-  await hrDrive(project, scale, Math.round(P * 100), 0, 0, "scale");
-  await sleep(60);
-  // enlarge about the box's own center: a source point Q maps to
-  // pos + (Q − C)·P, so pos = B(1−P) + C·P keeps the box center put.
+  // The reference pop GROWS out of its region: scale animates 100 → pop%
+  // and position animates so the source box center travels to the popped
+  // rect's center (a source point Q maps to pos + (Q − C)·P, so
+  // pos = T − (B − C)·P puts box center B at screen point T). At P = 1 that
+  // is pos = C: the cropped region sits exactly over its source — the grow
+  // starts seamlessly from the untouched picture.
   const C = [rect.width / 2, rect.height / 2];
   const B = [(hrBox.x + hrBox.w / 2) * rect.width, (hrBox.y + hrBox.h / 2) * rect.height];
+  const T = popCenter ? [popCenter.x * rect.width, popCenter.y * rect.height] : B;
+  const inSec = Math.max(0.1, (inFrames || 12) / 30);
+  const kfT = srcT;                     // dup keyframes live at its in-point
+  await hrDrive(project, scale, Math.round(P * 100), kfT, inSec, "scale", 100);
+  await sleep(60);
   const tpl = await hrCurrentValue(pos).catch(() => null);
+  const mk = (x, y) => hrMakeXY(tpl != null ? tpl : [0, 0], x, y);
   await hrDrive(project, pos,
-    hrMakeXY(tpl != null ? tpl : [0, 0], B[0] * (1 - P) + C[0] * P, B[1] * (1 - P) + C[1] * P),
-    0, 0, "pos");
+    mk(T[0] - (B[0] - C[0]) * P, T[1] - (B[1] - C[1]) * P),
+    kfT, inSec, "pos", mk(C[0], C[1]));
   return track;
 }
 
@@ -3619,6 +3627,24 @@ async function hrCreateHighlight() {
   const dim   = Math.max(0, Math.min(1, (Number($("#hr-hldim")?.value) || 50) / 100));
   const hold  = Math.max(1, Number($("#hr-hlhold")?.value) || 90);
 
+  // With Pop on, the outline belongs to the POPPED copy, not the source
+  // region (the reference wraps its glowing border around the enlarged
+  // floater while everything else — original region included — dims).
+  // Compute where the pop will land and draw the overlay THERE; the pop
+  // grows into that exact rect, so outline and copy coincide forever.
+  const popPct = Math.max(105, Math.min(400, Number($("#hr-popsize")?.value) || 170));
+  let obox = { x: hrBox.x, y: hrBox.y, w: hrBox.w, h: hrBox.h };
+  let popCenter = null;
+  if (hrPopOn) {
+    const P = popPct / 100;
+    const pw = Math.min(1, hrBox.w * P), ph = Math.min(1, hrBox.h * P);
+    let pcx = hrBox.x + hrBox.w / 2, pcy = hrBox.y + hrBox.h / 2;
+    pcx = Math.min(1 - pw / 2, Math.max(pw / 2, pcx));   // keep the pop on screen
+    pcy = Math.min(1 - ph / 2, Math.max(ph / 2, pcy));
+    obox = { x: pcx - pw / 2, y: pcy - ph / 2, w: pw, h: ph };
+    popCenter = { x: pcx, y: pcy };
+  }
+
   overlayShow("Rendering your highlight");
   overlayProgress(10, "Rendering the overlay locally…", "");
   let data;
@@ -3626,7 +3652,7 @@ async function hrCreateHighlight() {
     const r = await fetch(`${HELPER}/render_highlight`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        x: hrBox.x, y: hrBox.y, w: hrBox.w, h: hrBox.h,
+        x: obox.x, y: obox.y, w: obox.w, h: obox.h,
         color, thickness: 6, radius: 18, dim, style,
         in_frames: speed, hold_frames: hold, out_frames: speed,
         width: Math.round(rect.width), height: Math.round(rect.height),
@@ -3652,8 +3678,7 @@ async function hrCreateHighlight() {
   if (hrPopOn) {
     overlayProgress(85, "Popping the region…", "");
     try {
-      const popPct = Math.max(105, Math.min(400, Number($("#hr-popsize")?.value) || 170));
-      const track = await hrCreatePop(project, sequence, rect, t0, data.duration_sec, popPct);
+      const track = await hrCreatePop(project, sequence, rect, t0, data.duration_sec, popPct, popCenter, speed);
       popNote = ` · popped on V${track + 1}`;
     } catch (e) { popNote = ` · pop skipped: ${e.message}`; }
   }
