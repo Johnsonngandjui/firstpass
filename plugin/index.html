@@ -200,35 +200,49 @@ section[data-view="headroom"] .card { margin-bottom: 14px; }
 section[data-view="headroom"] .card-title { margin-bottom: 2px; }
 /* UXP has no CSS Grid (flexbox only) — a grid container renders empty, which
    is exactly how the 3×3 dial and shape buttons vanished. Fixed-width wrap:
-   3 cells × 44px + 2 gaps × 8px = 148px, so flex-wrap breaks rows of three. */
-#hr-grid { display: flex; flex-wrap: wrap; gap: 8px; width: 148px; }
+   3 cells × (44px + 8px margins) = 156px, so flex-wrap breaks rows of three.
+   Margins, not gap — UXP drops flex gap between wrapped rows. */
+#hr-grid { display: flex; flex-wrap: wrap; gap: 0; width: 156px; margin: -4px; }
 /* UXP sizes flex items by flex-basis, ignoring width — auto/percentage bases
    made the dial stack one oval per row. Pixel basis + max-width pins 44px
-   cells, so the 148px container folds them into rows of three. */
-#hr-grid .hr-pos { flex: 0 0 44px; width: 44px; max-width: 44px; height: 44px; padding: 0; font-size: 15px; border-radius: 50%; }
+   cells, so the 156px container folds them into rows of three. */
+#hr-grid .hr-pos { flex: 0 0 44px; width: 44px; max-width: 44px; height: 44px; margin: 4px; padding: 0; font-size: 15px; border-radius: 50%; }
 /* Columns wrap instead of crushing: at narrow widths the Position dial drops
-   below the Shape column. Pixel flex bases only — UXP ignores % bases. */
-.hr-row2 { display: flex; flex-wrap: wrap; gap: 20px; margin-top: 10px; }
-.hr-col { display: flex; flex-direction: column; gap: 10px; }
+   below the Shape column. Pixel flex bases only — UXP ignores % bases.
+   Column spacing via margins so a wrapped (stacked) layout keeps its gap. */
+.hr-row2 { display: flex; flex-wrap: wrap; gap: 0; margin: 0 -10px -10px; }
+.hr-col { display: flex; flex-direction: column; gap: 10px; margin: 10px; }
 .hr-col.grow { flex: 1 1 190px; min-width: 0; }
-/* Labeled inputs share one wrapping row; each field keeps its label attached. */
-.hr-fields { display: flex; flex-wrap: wrap; gap: 10px; }
-.hr-fields .field { flex: 1 1 72px; gap: 5px; }
+/* Labeled inputs share one wrapping row; each field keeps its label attached.
+   Margins, not gap — wrapped rows keep their spacing under UXP. */
+.hr-fields { display: flex; flex-wrap: wrap; gap: 0; margin: -5px; }
+.hr-fields .field { flex: 1 1 72px; gap: 5px; margin: 5px; }
 .hr-fields .hr-input { width: 100%; }
 /* The one primary action per card is a full-width target (Fitts). */
 #hr-apply { flex: 1 1 auto; text-align: center; }
 /* Zoom amounts share rows evenly — equal px bases (UXP ignores %), no
    spacer, so wrapping fills each row edge to edge instead of leaving holes.
-   Spacing is per-button margin, not gap: UXP drops flex row-gap between
-   wrapped rows, which fused the buttons into one blob at narrow widths. */
-.hr-zooms { gap: 0; }
-.hr-zooms .hr-zoom { flex: 1 1 96px; text-align: center; margin: 4px; }
+   The 6px margin comes from the section-wide action-bar child rule. */
+.hr-zooms .hr-zoom { flex: 1 1 96px; text-align: center; }
 #hr-zoomfocus.active { border-color: var(--accent, #7c8cff); color: var(--text); }
-.hr-shapes { display: flex; flex-wrap: wrap; gap: 8px; }
-.hr-shapes .hr-shape { flex: 1 1 60px; }   /* px basis (UXP ignores %) → one row of four, wraps 2+2 when narrow */
+.hr-shapes { display: flex; flex-wrap: wrap; gap: 0; margin: -4px; }   /* margins, not gap — wrapped rows keep spacing */
+.hr-shapes .hr-shape { flex: 1 1 60px; margin: 4px; }   /* px basis (UXP ignores %) → one row of four, wraps 2+2 when narrow */
 .hr-shape, .hr-shapes .btn { min-height: 46px; }
 .hr-lbl { font-size: 11px; color: var(--text-mute); font-weight: 600; letter-spacing: .4px; text-transform: uppercase; }
-section[data-view="headroom"] .action-bar { margin-top: 0; }
+/* Headroom + Graphics action bars: Master's 12px gutters, wrap-proof. UXP
+   drops flex gap between wrapped rows (buttons fuse into a blob), so each
+   control carries a 6px margin instead; the bar pulls -6px so edges stay
+   flush with the card, and the legacy btn+btn nudge is neutralized. */
+section[data-view="headroom"] .action-bar,
+section[data-view="motiongfx"] .action-bar { gap: 0; margin: -6px; }
+section[data-view="headroom"] .action-bar > *,
+section[data-view="motiongfx"] .action-bar > * { margin: 6px; }
+section[data-view="headroom"] .action-bar .btn + .btn,
+section[data-view="motiongfx"] .action-bar .btn + .btn { margin-left: 6px; }
+section[data-view="headroom"] .action-bar .flex-spacer,
+section[data-view="motiongfx"] .action-bar .flex-spacer { margin: 0; }
+/* unit labels hug their input (6px) instead of floating a full gutter away */
+section[data-view="headroom"] .action-bar .hr-input-lbl { margin-left: 0; }
 section[data-view="headroom"] .card { gap: 12px; }
 #hr-frame-wrap { max-width: 460px; }
 #hr-frame { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
