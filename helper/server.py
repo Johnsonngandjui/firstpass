@@ -398,15 +398,24 @@ def render_highlight(req: RenderHighlightRequest):
         raise HTTPException(500, "node not found — install Node.js to render highlights")
     if not (_GRAPHICS_DIR / "render.mjs").exists():
         raise HTTPException(500, f"graphics pipeline missing at {_GRAPHICS_DIR}")
-    fps = 30
-    dur = round((req.in_frames + req.hold_frames + req.out_frames) / fps, 3)
+    # 29.97 to match the render fps below — length was computed at 30 while the
+    # media rendered at 29.97, so the placed clip asked for one frame past the
+    # media end ("Error retrieving frame N, substituting N-1"). PAD extends the
+    # hold; the reported duration stops 2 frames short of the media tail, whose
+    # last ProRes samples Premiere refuses to decode. Timestamped name so the
+    # media cache can never serve a stale render.
+    fps = 29.97
+    pad = 8
+    dur = round((req.in_frames + req.hold_frames + req.out_frames + pad) / fps, 3)
+    import time as _tt
+    name = f"highlight_{int(_tt.time())}.mov"
     spec = {
         "version": 1,
         "sourceTranscript": "(headroom highlight)",
         "sequence": {"name": "Headroom Highlight", "frameWidth": req.width,
                      "frameHeight": req.height, "fps": 29.97},
         "graphics": [{
-            "id": "hl", "template": "highlight", "file": "highlight.mov",
+            "id": "hl", "template": "highlight", "file": name,
             "startSec": 0, "durationSec": dur, "label": "headroom highlight",
             "props": {"x": req.x, "y": req.y, "w": req.w, "h": req.h,
                       "color": req.color, "thickness": req.thickness,
@@ -419,11 +428,11 @@ def render_highlight(req: RenderHighlightRequest):
     out_dir = _GRAPHICS_DIR / "out" / "headroom"
     r = subprocess.run([node, "render.mjs", str(spec_path), str(out_dir)],
                        cwd=str(_GRAPHICS_DIR), capture_output=True, timeout=600)
-    mov = out_dir / "highlight.mov"
+    mov = out_dir / name
     if r.returncode != 0 or not mov.exists():
         tail = (r.stderr or r.stdout or b"").decode()[-400:]
         raise HTTPException(500, f"highlight render failed: {tail}")
-    return {"ok": True, "file": str(mov), "duration_sec": dur}
+    return {"ok": True, "file": str(mov), "duration_sec": round(dur - 2 / fps, 3)}
 
 
 @app.post("/plan_flow")
