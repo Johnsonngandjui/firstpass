@@ -2594,6 +2594,7 @@ function hrUiChoice() {
 // Height % become symmetric crop values; 100/100 means no crop to apply.
 async function hrEnsureCrop(project, clip, wPct, hPct) {
   const L = Math.max(0, (100 - wPct) / 2), T = Math.max(0, (100 - hPct) / 2);
+  const wanted = { left: L, top: T, right: L, bottom: T };
   const chain = await clip.getComponentChain();
   const findCrop = async () => {
     const n = await chain.getComponentCount();
@@ -2606,7 +2607,7 @@ async function hrEnsureCrop(project, clip, wPct, hPct) {
   };
   let comp = await findCrop();
   if (!comp) {
-    if (L === 0 && T === 0) return;                    // nothing to crop, nothing to add
+    if (Object.values(wanted).every((v) => v <= 0)) return;   // nothing to crop, nothing to add
     const F = ppro.VideoFilterFactory;
     if (!F) throw new Error("This build doesn't expose effect creation.");
     const match = (await F.getMatchNames().catch(() => null)) || [];
@@ -2620,7 +2621,6 @@ async function hrEnsureCrop(project, clip, wPct, hPct) {
     comp = await findCrop();                            // write to the ATTACHED instance
     if (!comp) throw new Error("Crop effect didn't attach.");
   }
-  const wanted = { left: L, top: T, right: L, bottom: T };
   const pc = await comp.getParamCount();
   for (let i = 0; i < pc; i++) {
     const p = await comp.getParam(i);
@@ -2802,11 +2802,20 @@ async function hrZoom(targetPct, opts) {
   if (!curXY) curXY = [cx, cy];
   const tpl = curPosRaw != null ? curPosRaw : curXY;
   const posCurrent = hrMakeXY(tpl, curXY[0], curXY[1]);
-  if (aimPt && targetPct > 100) {
-    const S = targetPct / 100;
+  // Pan toward the point, but never past the clip's edge: at scale S the
+  // frame stays covered only while the offset stays within ±(S−1)/2 of
+  // center — clamp so an edge-hugging Focus box zooms without black bars.
+  const zoomTargetXY = (S) => {
     const px = norm ? aimPt.x : aimPt.x * rect.width;
     const py = norm ? aimPt.y : aimPt.y * rect.height;
-    const target = hrMakeXY(tpl, cx - (px - cx) * S, cy - (py - cy) * S);
+    const maxX = ((S - 1) / 2) * (norm ? 1 : rect.width);
+    const maxY = ((S - 1) / 2) * (norm ? 1 : rect.height);
+    return [cx + Math.max(-maxX, Math.min(maxX, -(px - cx) * S)),
+            cy + Math.max(-maxY, Math.min(maxY, -(py - cy) * S))];
+  };
+  if (aimPt && targetPct > 100) {
+    const [zx, zy] = zoomTargetXY(targetPct / 100);
+    const target = hrMakeXY(tpl, zx, zy);
     await hrDrive(project, pos, target, t0, dur, "pos", posCurrent);
     await sleep(100);
   } else if (targetPct <= 100) {
@@ -2848,10 +2857,8 @@ async function hrZoom(targetPct, opts) {
           const oTpl = oRaw != null ? oRaw : oCur;
           const oCurKf = hrMakeXY(oTpl, oCur[0], oCur[1]);
           if (aimPt && targetPct > 100) {
-            const S = targetPct / 100;
-            const px = norm ? aimPt.x : aimPt.x * rect.width;
-            const py = norm ? aimPt.y : aimPt.y * rect.height;
-            await hrDrive(project, m.pos, hrMakeXY(oTpl, cx - (px - cx) * S, cy - (py - cy) * S), o0, odur, "pos", oCurKf);
+            const [zx, zy] = zoomTargetXY(targetPct / 100);
+            await hrDrive(project, m.pos, hrMakeXY(oTpl, zx, zy), o0, odur, "pos", oCurKf);
           } else if (targetPct <= 100) {
             await hrDrive(project, m.pos, hrMakeXY(oTpl, cx, cy), o0, odur, "pos", oCurKf);
           }
@@ -3008,13 +3015,41 @@ async function hrClipMeta(clip, t) {
   return { mp, srcTime: Math.max(0, inS + (t - st)), st };
 }
 
-async function hrGrab(mp, srcTime) {
+async function hrGrab(mp, srcTime, view) {
+  const body = { media_path: mp, time_sec: srcTime };
+  if (view) {
+    body.view_x = view.x; body.view_y = view.y;
+    body.view_w = view.w; body.view_h = view.h;
+  }
   const r = await fetch(`${HELPER}/frame_grab`, {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ media_path: mp, time_sec: srcTime })
+    body: JSON.stringify(body)
   });
   if (!r.ok) throw new Error("Frame grab failed — is the helper running?");
   return (await r.json()).data_url;
+}
+
+// A clip carrying a zoom (Motion position/scale) shows only a WINDOW of its
+// source. Compute that window in source fractions so the grab can bake it in
+// and the picker matches the program monitor — a box drawn on the still is
+// then a true sequence fraction, and highlights land exactly where drawn.
+async function hrViewWindow(clip, sequence) {
+  try {
+    const { pos, scale } = await hrMotionParams(clip);
+    const { t0 } = await hrClipTimes(clip, sequence, 0);
+    const rect = await sequence.getFrameSize().catch(() => null);
+    const S = (((await hrValueAt(scale, t0, "scale")) || 100) / 100);
+    if (!(S > 1.001)) return null;                 // whole frame visible as-is
+    const xy = hrReadXY(await hrValueAt(pos, t0, "pos"));
+    let px = 0.5, py = 0.5;
+    if (xy && Math.abs(xy[0]) <= 2 && Math.abs(xy[1]) <= 2) { px = xy[0]; py = xy[1]; }
+    else if (xy && rect) { px = xy[0] / rect.width; py = xy[1] / rect.height; }
+    // sequence point p shows source point q = 0.5 + (p − pos)/S
+    const w = 1 / S, h = 1 / S;
+    const x = Math.max(0, Math.min(1 - w, 0.5 + (0 - px) / S));
+    const y = Math.max(0, Math.min(1 - h, 0.5 + (0 - py) / S));
+    return { x, y, w, h };
+  } catch (_) { return null; }
 }
 
 // The reference behavior: the preview shows the SCENE (what's behind), and the
@@ -3058,10 +3093,12 @@ async function hrRefreshFrame() {
   const rectAR = await sequence.getFrameSize().catch(() => null);
   const frameImg = $("#hr-frame"), wrapEl = $("#hr-frame-wrap");
   if (hrMode() !== "dest" && selMeta && selMeta.mp) {
-    // Zoom and Focus aim at the CLIP itself — show its own frame. The
+    // Zoom and Focus aim at the CLIP itself — show its own frame, cropped to
+    // the window its Motion currently shows (WYSIWYG with the program). The
     // behind-the-clip scene (Destination's background) is plain black on a
     // single-track timeline, which made this preview useless for aiming.
-    frameImg.src = await hrGrab(selMeta.mp, selMeta.srcTime);
+    const view = sel ? await hrViewWindow(sel, sequence) : null;
+    frameImg.src = await hrGrab(selMeta.mp, selMeta.srcTime, view);
     frameImg.style.display = "block";
   } else if (bgMeta) {
     frameImg.src = await hrGrab(bgMeta.mp, bgMeta.srcTime);
@@ -3147,18 +3184,32 @@ function hrSyncMode() {
 
 let hrSeqAR = 9 / 16;                       // sequence height/width, set on refresh
 let hrSeqW = 3840;                          // sequence pixel width, set on refresh
+// The one outline color, validated: swatch, Focus box, and the render all
+// read from here so the picker preview IS the color that lands in the video.
+function hrHlColor() {
+  const raw = ($("#hr-hlcolor")?.value || "").trim();
+  return /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(raw) ? raw : "#f5f5f5";
+}
 function hrRenderOverlays() {
   const wrap = $("#hr-frame-wrap"), box = $("#hr-box"), pt = $("#hr-point");
   if (!wrap || !box || !pt) return;
   // the preview ALWAYS holds the sequence aspect — never the image's whims
   wrap.style.height = Math.round((wrap.clientWidth || 300) * hrSeqAR) + "px";
   const W = wrap.clientWidth, H = wrap.clientHeight;
+  const swatch = $("#hr-hlswatch");
+  if (swatch) swatch.style.background = hrHlColor();
   // Zoom mode aims with the point — the Destination box is another tab's
   // tool, so it hides (state stays; it's back when the tab is).
   if (hrBox && hrMode() !== "zoom") {
     box.style.display = "block";
     box.style.left = (hrBox.x * W) + "px";  box.style.top = (hrBox.y * H) + "px";
     box.style.width = (hrBox.w * W) + "px"; box.style.height = (hrBox.h * H) + "px";
+    // Focus mode: the box wears the outline color it will render with —
+    // Destination mode keeps the neutral marquee.
+    const hlc = hrMode() === "focus" ? hrHlColor() : "#e8e8e8";
+    box.style.borderColor = hlc;
+    const hnd = $("#hr-box-handle");
+    if (hnd) hnd.style.background = hlc;
     // the box frames the CROPPED region: oversize the thumb so only the
     // central shapeW×shapeH slice shows — preview IS the final composite
     const lay = hrLayoutFromBox();
@@ -3530,85 +3581,6 @@ async function hrResetMotion() {
   toast("Clip motion cleared — full frame, no keyframes. (Cmd+Z to undo.)");
 }
 
-// Pop: duplicate the selected clip on a fresh top track, crop it to the Focus
-// box, and enlarge it about its own center (the reference's "Pop selected
-// region" with its Center-on-focus default) — a magnified callout floating
-// over the dimmed highlight for exactly the highlight's duration.
-async function hrCreatePop(project, sequence, rect, tSeq, durSec, popPct, popCenter, inFrames) {
-  const clip = await hrTargetClip(sequence);
-  const rawItem = await clip.getProjectItem();
-  const srcClip = ppro.ClipProjectItem.cast(rawItem);
-  let inS = 0, st = 0;
-  try { const p = await clip.getInPoint();   inS = p ? p.seconds : 0; } catch (_) {}
-  try { const s = await clip.getStartTime(); st = s ? s.seconds : 0; } catch (_) {}
-  const srcT = Math.max(0, inS + (tSeq - st));
-  const mkTT = (s) => ppro.TickTime.createWithSeconds(Math.round(s * 1000) / 1000);
-  if (srcClip && typeof srcClip.createSetInOutPointsAction === "function") {
-    try {
-      await project.lockedAccess(() => project.executeTransaction((c) => {
-        c.addAction(srcClip.createSetInOutPointsAction(mkTT(srcT), mkTT(srcT + durSec)));
-      }, "FirstPass: trim pop"));
-    } catch (_) {}
-  }
-  const SE = ppro.SequenceEditor, editor = SE && SE.getEditor(sequence);
-  if (!editor) throw new Error("Timeline editor API missing.");
-  let track;
-  try {
-    track = await mgResolveTrack(ppro, project, sequence, editor);
-    await project.lockedAccess(() => project.executeTransaction((c) => {
-      c.addAction(editor.createOverwriteItemAction(rawItem, mkTT(tSeq), track, 0));
-    }, "FirstPass: place pop"));
-  } catch (resolveErr) {
-    track = await mgPlaceOnNewTopTrack(ppro, project, sequence, editor, rawItem, mkTT(tSeq));
-    if (track < 0) throw resolveErr;
-  }
-  // the duplicate is placed — put the source item's marks back
-  if (srcClip && typeof srcClip.createClearInOutPointsAction === "function") {
-    try {
-      await project.lockedAccess(() => project.executeTransaction((c) => {
-        c.addAction(srcClip.createClearInOutPointsAction());
-      }, "FirstPass: restore pop source"));
-    } catch (_) {}
-  }
-  await sleep(200);
-  const CLIP = ppro.Constants?.TrackItemType?.Clip ?? 1;
-  const trk = await sequence.getVideoTrack(track);
-  let popItem = null;
-  for (const it of (await trk.getTrackItems(CLIP, false) || [])) {
-    let s2 = 0; try { const v = await it.getStartTime(); s2 = v ? v.seconds : 0; } catch (_) {}
-    if (Math.abs(s2 - tSeq) < 0.05) { popItem = it; break; }
-  }
-  if (!popItem) throw new Error("Pop clip didn't land.");
-  const { pos, scale, crop } = await hrMotionParams(popItem);
-  const P = Math.max(1.05, popPct / 100);
-  const cropT = { left: hrBox.x * 100, top: hrBox.y * 100,
-                  right: (1 - hrBox.x - hrBox.w) * 100, bottom: (1 - hrBox.y - hrBox.h) * 100 };
-  if (crop) for (const k of ["left", "right", "top", "bottom"]) {
-    if (!crop[k]) continue;
-    await hrDrive(project, crop[k], Math.max(0, Math.min(95, cropT[k])), 0, 0, "pct");
-    await sleep(60);
-  }
-  // The reference pop GROWS out of its region: scale animates 100 → pop%
-  // and position animates so the source box center travels to the popped
-  // rect's center (a source point Q maps to pos + (Q − C)·P, so
-  // pos = T − (B − C)·P puts box center B at screen point T). At P = 1 that
-  // is pos = C: the cropped region sits exactly over its source — the grow
-  // starts seamlessly from the untouched picture.
-  const C = [rect.width / 2, rect.height / 2];
-  const B = [(hrBox.x + hrBox.w / 2) * rect.width, (hrBox.y + hrBox.h / 2) * rect.height];
-  const T = popCenter ? [popCenter.x * rect.width, popCenter.y * rect.height] : B;
-  const inSec = Math.max(0.1, (inFrames || 12) / 30);
-  const kfT = srcT;                     // dup keyframes live at its in-point
-  await hrDrive(project, scale, Math.round(P * 100), kfT, inSec, "scale", 100);
-  await sleep(60);
-  const tpl = await hrCurrentValue(pos).catch(() => null);
-  const mk = (x, y) => hrMakeXY(tpl != null ? tpl : [0, 0], x, y);
-  await hrDrive(project, pos,
-    mk(T[0] - (B[0] - C[0]) * P, T[1] - (B[1] - C[1]) * P),
-    kfT, inSec, "pos", mk(C[0], C[1]));
-  return track;
-}
-
 async function hrCreateHighlight() {
   hrStatus("");
   if (!hrBox || hrBox.w < 0.02 || hrBox.h < 0.02)
@@ -3623,27 +3595,9 @@ async function hrCreateHighlight() {
 
   const style = ($('.segmented[data-group="hr-hlstyle"] .seg.active') || {}).dataset?.val || "fade";
   const speed = Number(($('.segmented[data-group="hr-hlspeed"] .seg.active') || {}).dataset?.val || 24);
-  const color = ($("#hr-hlcolor") && $("#hr-hlcolor").value.trim()) || "#f5f5f5";
+  const color = hrHlColor();   // same validated value the Focus box previews
   const dim   = Math.max(0, Math.min(1, (Number($("#hr-hldim")?.value) || 50) / 100));
   const hold  = Math.max(1, Number($("#hr-hlhold")?.value) || 90);
-
-  // With Pop on, the outline belongs to the POPPED copy, not the source
-  // region (the reference wraps its glowing border around the enlarged
-  // floater while everything else — original region included — dims).
-  // Compute where the pop will land and draw the overlay THERE; the pop
-  // grows into that exact rect, so outline and copy coincide forever.
-  const popPct = Math.max(105, Math.min(400, Number($("#hr-popsize")?.value) || 170));
-  let obox = { x: hrBox.x, y: hrBox.y, w: hrBox.w, h: hrBox.h };
-  let popCenter = null;
-  if (hrPopOn) {
-    const P = popPct / 100;
-    const pw = Math.min(1, hrBox.w * P), ph = Math.min(1, hrBox.h * P);
-    let pcx = hrBox.x + hrBox.w / 2, pcy = hrBox.y + hrBox.h / 2;
-    pcx = Math.min(1 - pw / 2, Math.max(pw / 2, pcx));   // keep the pop on screen
-    pcy = Math.min(1 - ph / 2, Math.max(ph / 2, pcy));
-    obox = { x: pcx - pw / 2, y: pcy - ph / 2, w: pw, h: ph };
-    popCenter = { x: pcx, y: pcy };
-  }
 
   overlayShow("Rendering your highlight");
   overlayProgress(10, "Rendering the overlay locally…", "");
@@ -3652,7 +3606,7 @@ async function hrCreateHighlight() {
     const r = await fetch(`${HELPER}/render_highlight`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        x: obox.x, y: obox.y, w: obox.w, h: obox.h,
+        x: hrBox.x, y: hrBox.y, w: hrBox.w, h: hrBox.h,
         color, thickness: 6, radius: 18, dim, style,
         in_frames: speed, hold_frames: hold, out_frames: speed,
         width: Math.round(rect.width), height: Math.round(rect.height),
@@ -3674,16 +3628,8 @@ async function hrCreateHighlight() {
   // Zooming AFTER a highlight still carries the overlay along (hrZoom mirrors
   // onto live overlays); for the reverse order, zoom first, then highlight
   // on the zoomed frame.
-  let popNote = "";
-  if (hrPopOn) {
-    overlayProgress(85, "Popping the region…", "");
-    try {
-      const track = await hrCreatePop(project, sequence, rect, t0, data.duration_sec, popPct, popCenter, speed);
-      popNote = ` · popped on V${track + 1}`;
-    } catch (e) { popNote = ` · pop skipped: ${e.message}`; }
-  }
   overlayHide();
-  toast(`Highlight placed at the playhead · ${data.duration_sec}s${popNote}. (Cmd+Z to undo.)`);
+  toast(`Highlight placed at the playhead · ${data.duration_sec}s. (Cmd+Z to undo.)`);
 }
 
 $$("#hr-grid .hr-pos").forEach((b) => b.addEventListener("click", () => {
@@ -3761,14 +3707,8 @@ $$('.segmented[data-group="hr-mode"] .seg').forEach((s) =>
 hrSyncMode();   // initial: only the active mode's cards show
 const hrHlBtn = $("#hr-hlcreate");
 if (hrHlBtn) hrHlBtn.addEventListener("click", () => withBusy(hrHlBtn, "Creating…", hrCreateHighlight));
-let hrPopOn = false;
-const hrPopBtn = $("#hr-pop");
-if (hrPopBtn) hrPopBtn.addEventListener("click", () => {
-  hrPopOn = !hrPopOn;
-  hrPopBtn.textContent = hrPopOn ? "Pop region: on" : "Pop region: off";
-  hrPopBtn.classList.toggle("active", hrPopOn);
-  hrPopBtn.setAttribute("aria-pressed", String(hrPopOn));
-});
+const hrHlColorInput = $("#hr-hlcolor");
+if (hrHlColorInput) hrHlColorInput.addEventListener("input", () => hrRenderOverlays());
 const hrZfBtn = $("#hr-zoomfocus");
 const hrZrBtn = $("#hr-zoomreset");
 if (hrZfBtn) hrZfBtn.addEventListener("click", () => withBusy(hrZfBtn, "Zooming…", async () => {

@@ -223,7 +223,7 @@ section[data-view="headroom"] .card-title { margin-bottom: 2px; }
    wrapped rows, which fused the buttons into one blob at narrow widths. */
 .hr-zooms { gap: 0; }
 .hr-zooms .hr-zoom { flex: 1 1 96px; text-align: center; margin: 4px; }
-#hr-pop.active, #hr-zoomfocus.active { border-color: var(--accent, #7c8cff); color: var(--text); }
+#hr-zoomfocus.active { border-color: var(--accent, #7c8cff); color: var(--text); }
 .hr-shapes { display: flex; flex-wrap: wrap; gap: 8px; }
 .hr-shapes .hr-shape { flex: 1 1 60px; }   /* px basis (UXP ignores %) → one row of four, wraps 2+2 when narrow */
 .hr-shape, .hr-shapes .btn { min-height: 46px; }
@@ -1236,11 +1236,7 @@ section[data-view="headroom"] .card { gap: 12px; }
             <div class="btn secondary" id="hr-motionreset" role="button" tabindex="0" title="Strip ALL Position/Scale/Crop keyframes from the clip and park it full-frame">Reset clip motion</div>
           </div>
           <div class="action-bar">
-            <div class="btn secondary" id="hr-pop" role="button" tabindex="0" aria-pressed="false" title="Duplicate and enlarge the highlighted area over the dim">Pop region: off</div>
-            <input id="hr-popsize" class="hr-input" type="text" value="170" style="width:52px;" aria-label="Pop size percent" title="How big the popped copy gets" />
-            <span class="hr-input-lbl">pop %</span>
-          </div>
-          <div class="action-bar">
+            <div id="hr-hlswatch" style="width:24px;height:24px;border-radius:6px;background:#f5f5f5;border:1px solid rgba(255,255,255,.35);flex:0 0 auto;" title="Selected outline color — the Focus box above previews it"></div>
             <input id="hr-hlcolor" class="hr-input" type="text" value="#f5f5f5" style="width:92px;" aria-label="Outline color" title="Outline color" />
             <input id="hr-hldim" class="hr-input" type="text" value="50" style="width:52px;" aria-label="Dim outside percent" title="Dim outside %" />
             <span class="hr-input-lbl">dim %</span>

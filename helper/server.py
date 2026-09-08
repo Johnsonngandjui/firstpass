@@ -82,6 +82,12 @@ class SaveTranscriptRequest(BaseModel):
 class FrameGrabRequest(BaseModel):
     media_path: str           # source file of the clip under the playhead
     time_sec:   float = 0.0   # SOURCE time (clip inPoint + playhead offset)
+    # normalized window of the source the sequence shows right now (baked from
+    # the clip's Motion position/scale) — defaults mean the whole frame
+    view_x: float = 0.0
+    view_y: float = 0.0
+    view_w: float = 1.0
+    view_h: float = 1.0
 
 class RenderMatteRequest(BaseModel):
     # rounded-rect matte matching the Headroom box, in frame fractions
@@ -237,8 +243,18 @@ def frame_grab(req: FrameGrabRequest):
         raise HTTPException(400, f"Media not found: {req.media_path}")
     t = max(0.0, float(req.time_sec))
     out = Path(tempfile.gettempdir()) / "firstpass_frame.jpg"
+    # A zoomed clip shows only a window of its source — crop the grab to that
+    # window so the panel's picker matches the program monitor pixel-for-pixel.
+    vw = min(1.0, max(0.05, float(req.view_w)))
+    vh = min(1.0, max(0.05, float(req.view_h)))
+    vx = min(1.0 - vw, max(0.0, float(req.view_x)))
+    vy = min(1.0 - vh, max(0.0, float(req.view_y)))
+    vf = "scale=640:-2"
+    if vw < 0.999 or vh < 0.999:
+        vf = (f"crop=floor(iw*{vw:.6f}/2)*2:floor(ih*{vh:.6f}/2)*2"
+              f":iw*{vx:.6f}:ih*{vy:.6f}," + vf)
     cmd = [FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-ss", f"{t:.3f}",
-           "-i", req.media_path, "-frames:v", "1", "-vf", "scale=640:-2",
+           "-i", req.media_path, "-frames:v", "1", "-vf", vf,
            "-q:v", "4", "-y", str(out)]
     r = subprocess.run(cmd, capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
     if r.returncode != 0 or not out.exists():
