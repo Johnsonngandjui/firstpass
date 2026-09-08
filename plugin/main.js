@@ -2770,7 +2770,7 @@ async function hrApplyInner(P) {
     : `Placed${verified}.`) + matteNote + " (Cmd+Z to undo.)");
 }
 
-async function hrZoom(targetPct) {
+async function hrZoom(targetPct, opts) {
   hrStatus("");
   const project = await ppro.Project.getActiveProject();
   const sequence = project && await project.getActiveSequence();
@@ -2778,8 +2778,11 @@ async function hrZoom(targetPct) {
   const clip = await hrTargetClip(sequence);
   const { pos, scale } = await hrMotionParams(clip);
   // Zoom speed lives on the Zoom card; the Move segmented is another tab's.
+  // Callers (Zoom into focus) can override both the speed and the aim point.
   const zd = $('.segmented[data-group="hr-zdur"] .seg.active');
-  const durSec = zd ? Number(zd.dataset.val) / 30 : hrUiChoice().durSec;
+  const durSec = (opts && opts.durSec)
+    || (zd ? Number(zd.dataset.val) / 30 : hrUiChoice().durSec);
+  const aimPt = (opts && opts.point) || hrPoint;
   // Keyframes live in clip SOURCE time — map the playhead into the clip.
   const { t0, dur: durClamped } = await hrClipTimes(clip, sequence, Math.max(durSec, 0.3));
   const dur = Math.max(0.1, durClamped);
@@ -2796,10 +2799,10 @@ async function hrZoom(targetPct) {
   if (!curXY) curXY = [cx, cy];
   const tpl = curPosRaw != null ? curPosRaw : curXY;
   const posCurrent = hrMakeXY(tpl, curXY[0], curXY[1]);
-  if (hrPoint && targetPct > 100) {
+  if (aimPt && targetPct > 100) {
     const S = targetPct / 100;
-    const px = norm ? hrPoint.x : hrPoint.x * rect.width;
-    const py = norm ? hrPoint.y : hrPoint.y * rect.height;
+    const px = norm ? aimPt.x : aimPt.x * rect.width;
+    const py = norm ? aimPt.y : aimPt.y * rect.height;
     const target = hrMakeXY(tpl, cx - (px - cx) * S, cy - (py - cy) * S);
     await hrDrive(project, pos, target, t0, dur, "pos", posCurrent);
     await sleep(100);
@@ -2809,9 +2812,20 @@ async function hrZoom(targetPct) {
     await sleep(100);
   }
   await hrDrive(project, scale, targetPct, t0, dur, "scale");
-  toast(hrPoint && targetPct > 100
+  toast(aimPt && targetPct > 100
     ? `Zooming to ${targetPct}% toward your point. (Cmd+Z to undo.)`
     : `Zooming to ${targetPct}% at the playhead. (Cmd+Z to undo.)`);
+}
+
+// Zoom into the Focus box: pick the scale that makes the box fill ~85% of the
+// frame (like the reference's fit-to-frame push) and aim at the box center.
+async function hrZoomToBox() {
+  if (!hrBox || hrBox.w < 0.02 || hrBox.h < 0.02)
+    throw new Error("Draw a Focus box on the frame first.");
+  const pct = Math.max(105, Math.min(400,
+    Math.round(Math.min(0.85 / hrBox.w, 0.85 / hrBox.h) * 100)));
+  const speed = Number(($('.segmented[data-group="hr-hlspeed"] .seg.active') || {}).dataset?.val || 24);
+  await hrZoom(pct, { durSec: speed / 30, point: hrBoxCenter() });
 }
 
 // Frame styles = real effects appended to the clip's component chain. Effect
@@ -3358,6 +3372,77 @@ async function hrApplyMatte(startSeqOpt, opts) {
   return { track: matteTrack, popupSet: true };
 }
 
+// Pop: duplicate the selected clip on a fresh top track, crop it to the Focus
+// box, and enlarge it about its own center (the reference's "Pop selected
+// region" with its Center-on-focus default) — a magnified callout floating
+// over the dimmed highlight for exactly the highlight's duration.
+async function hrCreatePop(project, sequence, rect, tSeq, durSec, popPct) {
+  const clip = await hrTargetClip(sequence);
+  const rawItem = await clip.getProjectItem();
+  const srcClip = ppro.ClipProjectItem.cast(rawItem);
+  let inS = 0, st = 0;
+  try { const p = await clip.getInPoint();   inS = p ? p.seconds : 0; } catch (_) {}
+  try { const s = await clip.getStartTime(); st = s ? s.seconds : 0; } catch (_) {}
+  const srcT = Math.max(0, inS + (tSeq - st));
+  const mkTT = (s) => ppro.TickTime.createWithSeconds(Math.round(s * 1000) / 1000);
+  if (srcClip && typeof srcClip.createSetInOutPointsAction === "function") {
+    try {
+      await project.lockedAccess(() => project.executeTransaction((c) => {
+        c.addAction(srcClip.createSetInOutPointsAction(mkTT(srcT), mkTT(srcT + durSec)));
+      }, "FirstPass: trim pop"));
+    } catch (_) {}
+  }
+  const SE = ppro.SequenceEditor, editor = SE && SE.getEditor(sequence);
+  if (!editor) throw new Error("Timeline editor API missing.");
+  let track;
+  try {
+    track = await mgResolveTrack(ppro, project, sequence, editor);
+    await project.lockedAccess(() => project.executeTransaction((c) => {
+      c.addAction(editor.createOverwriteItemAction(rawItem, mkTT(tSeq), track, 0));
+    }, "FirstPass: place pop"));
+  } catch (resolveErr) {
+    track = await mgPlaceOnNewTopTrack(ppro, project, sequence, editor, rawItem, mkTT(tSeq));
+    if (track < 0) throw resolveErr;
+  }
+  // the duplicate is placed — put the source item's marks back
+  if (srcClip && typeof srcClip.createClearInOutPointsAction === "function") {
+    try {
+      await project.lockedAccess(() => project.executeTransaction((c) => {
+        c.addAction(srcClip.createClearInOutPointsAction());
+      }, "FirstPass: restore pop source"));
+    } catch (_) {}
+  }
+  await sleep(200);
+  const CLIP = ppro.Constants?.TrackItemType?.Clip ?? 1;
+  const trk = await sequence.getVideoTrack(track);
+  let popItem = null;
+  for (const it of (await trk.getTrackItems(CLIP, false) || [])) {
+    let s2 = 0; try { const v = await it.getStartTime(); s2 = v ? v.seconds : 0; } catch (_) {}
+    if (Math.abs(s2 - tSeq) < 0.05) { popItem = it; break; }
+  }
+  if (!popItem) throw new Error("Pop clip didn't land.");
+  const { pos, scale, crop } = await hrMotionParams(popItem);
+  const P = Math.max(1.05, popPct / 100);
+  const cropT = { left: hrBox.x * 100, top: hrBox.y * 100,
+                  right: (1 - hrBox.x - hrBox.w) * 100, bottom: (1 - hrBox.y - hrBox.h) * 100 };
+  if (crop) for (const k of ["left", "right", "top", "bottom"]) {
+    if (!crop[k]) continue;
+    await hrDrive(project, crop[k], Math.max(0, Math.min(95, cropT[k])), 0, 0, "pct");
+    await sleep(60);
+  }
+  await hrDrive(project, scale, Math.round(P * 100), 0, 0, "scale");
+  await sleep(60);
+  // enlarge about the box's own center: a source point Q maps to
+  // pos + (Q − C)·P, so pos = B(1−P) + C·P keeps the box center put.
+  const C = [rect.width / 2, rect.height / 2];
+  const B = [(hrBox.x + hrBox.w / 2) * rect.width, (hrBox.y + hrBox.h / 2) * rect.height];
+  const tpl = await hrCurrentValue(pos).catch(() => null);
+  await hrDrive(project, pos,
+    hrMakeXY(tpl != null ? tpl : [0, 0], B[0] * (1 - P) + C[0] * P, B[1] * (1 - P) + C[1] * P),
+    0, 0, "pos");
+  return track;
+}
+
 async function hrCreateHighlight() {
   hrStatus("");
   if (!hrBox || hrBox.w < 0.02 || hrBox.h < 0.02)
@@ -3399,8 +3484,17 @@ async function hrCreateHighlight() {
   try {
     await hrPlaceFile(data.file, data.duration_sec, t0);
   } catch (err) { overlayHide(); throw err; }
+  let popNote = "";
+  if (hrPopOn) {
+    overlayProgress(85, "Popping the region…", "");
+    try {
+      const popPct = Math.max(105, Math.min(400, Number($("#hr-popsize")?.value) || 170));
+      const track = await hrCreatePop(project, sequence, rect, t0, data.duration_sec, popPct);
+      popNote = ` · popped on V${track + 1}`;
+    } catch (e) { popNote = ` · pop skipped: ${e.message}`; }
+  }
   overlayHide();
-  toast(`Highlight placed at the playhead · ${data.duration_sec}s. (Cmd+Z to undo.)`);
+  toast(`Highlight placed at the playhead · ${data.duration_sec}s${popNote}. (Cmd+Z to undo.)`);
 }
 
 $$("#hr-grid .hr-pos").forEach((b) => b.addEventListener("click", () => {
@@ -3478,6 +3572,21 @@ $$('.segmented[data-group="hr-mode"] .seg').forEach((s) =>
 hrSyncMode();   // initial: only the active mode's cards show
 const hrHlBtn = $("#hr-hlcreate");
 if (hrHlBtn) hrHlBtn.addEventListener("click", () => withBusy(hrHlBtn, "Creating…", hrCreateHighlight));
+let hrPopOn = false;
+const hrPopBtn = $("#hr-pop");
+if (hrPopBtn) hrPopBtn.addEventListener("click", () => {
+  hrPopOn = !hrPopOn;
+  hrPopBtn.textContent = hrPopOn ? "Pop region: on" : "Pop region: off";
+  hrPopBtn.classList.toggle("active", hrPopOn);
+  hrPopBtn.setAttribute("aria-pressed", String(hrPopOn));
+});
+const hrZfBtn = $("#hr-zoomfocus");
+if (hrZfBtn) hrZfBtn.addEventListener("click", () => withBusy(hrZfBtn, "Zooming…", hrZoomToBox));
+const hrZrBtn = $("#hr-zoomreset");
+if (hrZrBtn) hrZrBtn.addEventListener("click", () => withBusy(hrZrBtn, "Resetting…", async () => {
+  const speed = Number(($('.segmented[data-group="hr-hlspeed"] .seg.active') || {}).dataset?.val || 24);
+  await hrZoom(100, { durSec: speed / 30 });
+}));
 
 // ── AI Motion: keyframe engine (emphasis scale zoom) ─────────────
 // ADBE Motion, Scale = param index 1 (probed). We keyframe it. The exact
