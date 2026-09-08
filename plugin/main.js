@@ -2775,7 +2775,10 @@ async function hrZoom(targetPct, opts) {
   const project = await ppro.Project.getActiveProject();
   const sequence = project && await project.getActiveSequence();
   if (!sequence) throw new Error("No active sequence — open your timeline.");
-  const clip = await hrTargetClip(sequence);
+  const { clip, trackIdx: clipTrack } = await hrTargetWithTrack(sequence);
+  let clipStart = 0;
+  try { const v = await clip.getStartTime(); clipStart = v ? v.seconds : 0; } catch (_) {}
+  const zoomOps = [];
   const { pos, scale } = await hrMotionParams(clip);
   // Zoom speed lives on the Zoom card; the Move segmented is another tab's.
   // Callers (Zoom into focus) can override both the speed and the aim point.
@@ -2812,6 +2815,7 @@ async function hrZoom(targetPct, opts) {
     await sleep(100);
   }
   await hrDrive(project, scale, targetPct, t0, dur, "scale");
+  zoomOps.push({ track: clipTrack, start: clipStart, t0, t1: t0 + dur });
 
   // A highlight overlay is a separate full-frame clip — without this it
   // stays screen-locked while the footage zooms underneath, and the outline
@@ -2853,14 +2857,80 @@ async function hrZoom(targetPct, opts) {
           }
           await sleep(60);
           await hrDrive(project, m.scale, targetPct, o0, odur, "scale");
+          zoomOps.push({ track: vt, start: st, t0: o0, t1: o0 + odur });
         } catch (_) {}
       }
     }
   } catch (_) {}
+  if (targetPct > 100) await hrZoomRecord(sequence, zoomOps);
 
   toast(aimPt && targetPct > 100
     ? `Zooming to ${targetPct}% toward your point. (Cmd+Z to undo.)`
     : `Zooming to ${targetPct}% at the playhead. (Cmd+Z to undo.)`);
+}
+
+// The last zoom's exact footprint — so Back to 100% can REMOVE it instead of
+// choreographing a second move. Every op: where the item lives and which
+// source-time window its zoom pair occupies.
+let hrLastZoom = null;
+
+async function hrZoomRecord(sequence, ops) { hrLastZoom = { ops }; }
+
+// Undo-like reset: strip the recorded zoom keys from the clip and overlays.
+// The hold before the zoom takes over again; a param left keyless gets its
+// pre-zoom value written back statically.
+async function hrZoomRemove() {
+  if (!hrLastZoom) return false;
+  const project = await ppro.Project.getActiveProject();
+  const sequence = project && await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence — open your timeline.");
+  const CLIP = ppro.Constants?.TrackItemType?.Clip ?? 1;
+  for (const op of hrLastZoom.ops) {
+    try {
+      const trk = await sequence.getVideoTrack(op.track);
+      let item = null;
+      for (const it of (await trk.getTrackItems(CLIP, false) || [])) {
+        let s = 0; try { const v = await it.getStartTime(); s = v ? v.seconds : 0; } catch (_) {}
+        if (Math.abs(s - op.start) < 0.05) { item = it; break; }
+      }
+      if (!item) continue;
+      const m = await hrMotionParams(item).catch(() => null);
+      if (!m) continue;
+      for (const kind of ["pos", "scale"]) {
+        const p = m[kind === "pos" ? "pos" : "scale"];
+        if (!p) continue;
+        let keys = [];
+        try { keys = (await p.getKeyframeListAsTickTimes()) || []; } catch (_) {}
+        const inWin = keys.filter((tt) => {
+          const s = tt && tt.seconds != null ? tt.seconds : null;
+          return s != null && s > op.t0 - 0.02 && s < op.t1 + 0.02;
+        });
+        if (!inWin.length) continue;
+        const preVal = await hrValueAt(p, op.t0, kind);   // start key = pre-zoom state
+        for (const tt of inWin) {
+          try {
+            await project.lockedAccess(() => project.executeTransaction((c) => {
+              c.addAction(p.createRemoveKeyframeAction(tt));
+            }, "FirstPass: remove zoom"));
+            await sleep(40);
+          } catch (_) {}
+        }
+        let left = [];
+        try { left = (await p.getKeyframeListAsTickTimes()) || []; } catch (_) {}
+        if (!left.length && preVal != null) {
+          const kf = await hrMakeKf(p, preVal);
+          await project.lockedAccess(() => project.executeTransaction((c) => {
+            try { c.addAction(p.createSetTimeVaryingAction(false)); } catch (_) {}
+            try { c.addAction(p.createSetValueAction(kf, true)); }
+            catch (_) { c.addAction(p.createSetValueAction(kf)); }
+          }, "FirstPass: restore pre-zoom"));
+        }
+      }
+    } catch (_) {}
+  }
+  hrLastZoom = null;
+  toast("Zoom removed — back to how it was. (Cmd+Z to undo.)");
+  return true;
 }
 
 // Zoom into the Focus box: pick the scale that makes the box fill ~85% of the
@@ -3705,8 +3775,13 @@ if (hrZfBtn) hrZfBtn.addEventListener("click", () => withBusy(hrZfBtn, "Zooming�
   hrZfBtn.textContent = "Zoomed into focus ✓";
 }));
 if (hrZrBtn) hrZrBtn.addEventListener("click", () => withBusy(hrZrBtn, "Resetting…", async () => {
-  const speed = Number(($('.segmented[data-group="hr-hlspeed"] .seg.active') || {}).dataset?.val || 24);
-  await hrZoom(100, { durSec: speed / 30 });
+  // Undo the zoom outright when we know its footprint (no residue baked into
+  // the clip); only choreograph an animated return when there's no record.
+  const removed = await hrZoomRemove().catch(() => false);
+  if (!removed) {
+    const speed = Number(($('.segmented[data-group="hr-hlspeed"] .seg.active') || {}).dataset?.val || 24);
+    await hrZoom(100, { durSec: speed / 30 });
+  }
   if (hrZfBtn) { hrZfBtn.classList.remove("active"); hrZfBtn.textContent = "Zoom into focus"; }
 }));
 
