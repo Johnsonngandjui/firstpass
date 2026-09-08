@@ -3418,6 +3418,61 @@ async function hrApplyMatte(startSeqOpt, opts) {
   return { track: matteTrack, popupSet: true };
 }
 
+// Glue an overlay to the footage: replicate the clip's Position/Scale motion
+// onto the overlay across the overlay's whole span, sampling at every clip
+// keyframe inside it plus both ends. Makes creation order irrelevant — a
+// highlight made before OR after a zoom stays locked to its subject (hrZoom
+// mirrors live overlays; this covers overlays born into existing motion).
+async function hrMirrorMotion(project, sequence, fromClip, toClip) {
+  const src = await hrMotionParams(fromClip);
+  const dst = await hrMotionParams(toClip);
+  const meta = async (c) => {
+    let st = 0, si = 0, du = 0;
+    try { const v = await c.getStartTime(); st = v ? v.seconds : 0; } catch (_) {}
+    try { const v = await c.getInPoint();   si = v ? v.seconds : 0; } catch (_) {}
+    try { const v = await c.getDuration();  du = v ? v.seconds : 0; } catch (_) {}
+    return { st, si, du };
+  };
+  const A = await meta(fromClip), B = await meta(toClip);
+  const bStart = B.st, bEnd = B.st + Math.max(0.1, B.du);
+  for (const kind of ["pos", "scale"]) {
+    const sp = src[kind === "pos" ? "pos" : "scale"];
+    const dp = dst[kind === "pos" ? "pos" : "scale"];
+    if (!sp || !dp) continue;
+    const times = [bStart, bEnd - 0.02];
+    try {
+      for (const tt of ((await sp.getKeyframeListAsTickTimes()) || [])) {
+        const sec = tt && tt.seconds != null ? tt.seconds : null;
+        if (sec == null) continue;
+        const seq = A.st + (sec - A.si);
+        if (seq > bStart + 0.01 && seq < bEnd - 0.03) times.push(seq);
+      }
+    } catch (_) {}
+    times.sort((a, b) => a - b);
+    let wrote = 0;
+    for (const seq of times) {
+      const v = await hrValueAt(sp, A.si + (seq - A.st), kind);
+      if (v == null) continue;                 // unkeyed static clip: nothing to mirror
+      if (!wrote) {
+        await hrSetVarying(project, dp, false); await sleep(60);
+        await hrSetVarying(project, dp, true);  await sleep(60);
+        try {
+          for (const tt of ((await dp.getKeyframeListAsTickTimes()) || [])) {
+            await project.lockedAccess(() => project.executeTransaction((c) => {
+              c.addAction(dp.createRemoveKeyframeAction(tt));
+            }, "FirstPass: clear overlay keys"));
+            await sleep(30);
+          }
+        } catch (_) {}
+      }
+      const bT = B.si + (seq - B.st);
+      await hrAddKf(project, dp, v, ppro.TickTime.createWithSeconds(Math.round(bT * 1000) / 1000), true);
+      wrote++;
+      await sleep(50);
+    }
+  }
+}
+
 // Pop: duplicate the selected clip on a fresh top track, crop it to the Focus
 // box, and enlarge it about its own center (the reference's "Pop selected
 // region" with its Center-on-focus default) — a magnified callout floating
@@ -3527,9 +3582,24 @@ async function hrCreateHighlight() {
     data = await r.json();
   } catch (err) { overlayHide(); throw err; }
   overlayProgress(70, "Placing on the timeline…", "");
+  let hlTrack;
   try {
-    await hrPlaceFile(data.file, data.duration_sec, t0);
+    hlTrack = await hrPlaceFile(data.file, data.duration_sec, t0);
   } catch (err) { overlayHide(); throw err; }
+  // Born into existing motion? Copy the footage's Position/Scale keyframes
+  // onto the fresh overlay so the outline tracks its subject even when the
+  // zoom was applied first.
+  try {
+    const clip = await hrTargetClip(sequence);
+    const CLIP = ppro.Constants?.TrackItemType?.Clip ?? 1;
+    const trk = await sequence.getVideoTrack(hlTrack);
+    let ov = null;
+    for (const it of (await trk.getTrackItems(CLIP, false) || [])) {
+      let s2 = 0; try { const v = await it.getStartTime(); s2 = v ? v.seconds : 0; } catch (_) {}
+      if (Math.abs(s2 - t0) < 0.05) { ov = it; break; }
+    }
+    if (ov) await hrMirrorMotion(project, sequence, clip, ov);
+  } catch (_) {}
   let popNote = "";
   if (hrPopOn) {
     overlayProgress(85, "Popping the region…", "");
