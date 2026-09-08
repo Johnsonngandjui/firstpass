@@ -218,8 +218,11 @@ section[data-view="headroom"] .card-title { margin-bottom: 2px; }
 /* The one primary action per card is a full-width target (Fitts). */
 #hr-apply { flex: 1 1 auto; text-align: center; }
 /* Zoom amounts share rows evenly — equal px bases (UXP ignores %), no
-   spacer, so wrapping fills each row edge to edge instead of leaving holes. */
-.hr-zooms .hr-zoom { flex: 1 1 96px; text-align: center; }
+   spacer, so wrapping fills each row edge to edge instead of leaving holes.
+   Spacing is per-button margin, not gap: UXP drops flex row-gap between
+   wrapped rows, which fused the buttons into one blob at narrow widths. */
+.hr-zooms { gap: 0; }
+.hr-zooms .hr-zoom { flex: 1 1 96px; text-align: center; margin: 4px; }
 .hr-shapes { display: flex; flex-wrap: wrap; gap: 8px; }
 .hr-shapes .hr-shape { flex: 1 1 60px; }   /* px basis (UXP ignores %) → one row of four, wraps 2+2 when narrow */
 .hr-shape, .hr-shapes .btn { min-height: 46px; }
@@ -862,7 +865,7 @@ section[data-view="headroom"] .card { gap: 12px; }
       </nav>
 
       <div class="sidebar-foot">
-        <span class="version">v1.1.0 · b0907l</span>
+        <span class="version">v1.1.0 · b0907m</span>
       </div>
     </aside>
 
@@ -1205,9 +1208,9 @@ section[data-view="headroom"] .card { gap: 12px; }
           </div>
           <div class="hr-lbl">Speed</div>
           <div class="segmented compact" data-group="hr-zdur">
-            <div class="seg" data-val="12" role="button" tabindex="0">Quick · 12f</div>
-            <div class="seg active" data-val="24" role="button" tabindex="0">Smooth · 24f</div>
-            <div class="seg" data-val="50" role="button" tabindex="0">Long · 50f</div>
+            <div class="seg" data-val="12" role="button" tabindex="0" title="12 frames">Quick</div>
+            <div class="seg active" data-val="24" role="button" tabindex="0" title="24 frames">Smooth</div>
+            <div class="seg" data-val="50" role="button" tabindex="0" title="50 frames">Long</div>
           </div>
         </div>
 
