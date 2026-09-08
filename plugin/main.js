@@ -2812,6 +2812,52 @@ async function hrZoom(targetPct, opts) {
     await sleep(100);
   }
   await hrDrive(project, scale, targetPct, t0, dur, "scale");
+
+  // A highlight overlay is a separate full-frame clip — without this it
+  // stays screen-locked while the footage zooms underneath, and the outline
+  // visually detaches from what it highlights (the reference keeps them
+  // glued the same way, via its adjustment layer above the overlays).
+  // Mirror the exact same move onto every overlay under the playhead.
+  try {
+    const ph2 = await sequence.getPlayerPosition().catch(() => null);
+    const seqT = ph2 ? ph2.seconds : 0;
+    const CLIP = ppro.Constants?.TrackItemType?.Clip ?? 1;
+    let vCount = 0; try { vCount = await sequence.getVideoTrackCount(); } catch (_) {}
+    for (let vt = 0; vt < vCount; vt++) {
+      const trk = await sequence.getVideoTrack(vt).catch(() => null);
+      if (!trk) continue;
+      for (const it of (await trk.getTrackItems(CLIP, false) || [])) {
+        try {
+          const rc = ppro.ClipProjectItem.cast(await it.getProjectItem());
+          const mp = rc ? await rc.getMediaFilePath() : null;
+          if (!mp || !/highlight[_\d]*\.mov$/i.test(mp)) continue;
+          let st = 0, du = 0;
+          try { const v = await it.getStartTime(); st = v ? v.seconds : 0; } catch (_) {}
+          try { const v = await it.getDuration();  du = v ? v.seconds : 0; } catch (_) {}
+          if (seqT < st - 0.01 || seqT >= st + du) continue;
+          const m = await hrMotionParams(it).catch(() => null);
+          if (!m) continue;
+          const { t0: o0, dur: od } = await hrClipTimes(it, sequence, Math.max(durSec, 0.3));
+          const odur = Math.max(0.1, od);
+          const oRaw = await hrValueAt(m.pos, o0, "pos");
+          const oCur = hrReadXY(oRaw) || [cx, cy];
+          const oTpl = oRaw != null ? oRaw : oCur;
+          const oCurKf = hrMakeXY(oTpl, oCur[0], oCur[1]);
+          if (aimPt && targetPct > 100) {
+            const S = targetPct / 100;
+            const px = norm ? aimPt.x : aimPt.x * rect.width;
+            const py = norm ? aimPt.y : aimPt.y * rect.height;
+            await hrDrive(project, m.pos, hrMakeXY(oTpl, cx - (px - cx) * S, cy - (py - cy) * S), o0, odur, "pos", oCurKf);
+          } else if (targetPct <= 100) {
+            await hrDrive(project, m.pos, hrMakeXY(oTpl, cx, cy), o0, odur, "pos", oCurKf);
+          }
+          await sleep(60);
+          await hrDrive(project, m.scale, targetPct, o0, odur, "scale");
+        } catch (_) {}
+      }
+    }
+  } catch (_) {}
+
   toast(aimPt && targetPct > 100
     ? `Zooming to ${targetPct}% toward your point. (Cmd+Z to undo.)`
     : `Zooming to ${targetPct}% at the playhead. (Cmd+Z to undo.)`);
@@ -3581,11 +3627,17 @@ if (hrPopBtn) hrPopBtn.addEventListener("click", () => {
   hrPopBtn.setAttribute("aria-pressed", String(hrPopOn));
 });
 const hrZfBtn = $("#hr-zoomfocus");
-if (hrZfBtn) hrZfBtn.addEventListener("click", () => withBusy(hrZfBtn, "Zooming…", hrZoomToBox));
 const hrZrBtn = $("#hr-zoomreset");
+if (hrZfBtn) hrZfBtn.addEventListener("click", () => withBusy(hrZfBtn, "Zooming…", async () => {
+  await hrZoomToBox();
+  // stateful look: stays lit until Back to 100% — "am I zoomed?" at a glance
+  hrZfBtn.classList.add("active");
+  hrZfBtn.textContent = "Zoomed into focus ✓";
+}));
 if (hrZrBtn) hrZrBtn.addEventListener("click", () => withBusy(hrZrBtn, "Resetting…", async () => {
   const speed = Number(($('.segmented[data-group="hr-hlspeed"] .seg.active') || {}).dataset?.val || 24);
   await hrZoom(100, { durSec: speed / 30 });
+  if (hrZfBtn) { hrZfBtn.classList.remove("active"); hrZfBtn.textContent = "Zoom into focus"; }
 }));
 
 // ── AI Motion: keyframe engine (emphasis scale zoom) ─────────────
